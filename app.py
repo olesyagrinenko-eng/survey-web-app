@@ -17,7 +17,7 @@ from flask import (
     send_file,
     flash,
 )
-from scipy.stats import norm
+import math
 
 try:
     import pyreadstat  # type: ignore
@@ -99,7 +99,8 @@ def _z_test_vs_total(
         return 0.0, 1.0
 
     z = (p1 - p2) / denom
-    p = 2 * (1 - norm.cdf(abs(z)))
+    # нормальное CDF через erf, чтобы не тянуть scipy
+    p = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
     return float(z), float(p)
 
 
