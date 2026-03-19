@@ -3,7 +3,7 @@ services:
     name: survey-web-app
     env: python
     rootDir: .
-    buildCommand: pip install -r requirements.txt
+ buildCommand: pip install --prefer-binary -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
       - key: FLASK_SECRET_KEY
