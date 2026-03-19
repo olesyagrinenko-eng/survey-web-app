@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Анализ опросных данных — загрузка файла</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div class="container py-5">
+      <div class="row justify-content-center">
+        <div class="col-lg-6">
+          <h2 class="mb-4 text-center">Анализ опросных данных (web‑версия)</h2>
+
+          {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+              {% for category, message in messages %}
+                <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                  {{ message }}
+                  <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+              {% endfor %}
+            {% endif %}
+          {% endwith %}
+
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <p class="mb-3">
+                Загрузите файл с сырыми данными опроса.<br>
+                Поддерживаемые форматы: <strong>CSV, XLS, XLSX, SAV (SPSS)</strong>.
+              </p>
+
+              <form method="post" enctype="multipart/form-data">
+                <div class="mb-3">
+                  <label for="data_file" class="form-label">Файл с данными</label>
+                  <input class="form-control" type="file" id="data_file" name="data_file" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">
+                  Загрузить и перейти к настройке
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+  </html>
+
