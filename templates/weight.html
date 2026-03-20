@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Взвешивание данных — кросс‑взвешивание</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div class="container py-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="mb-0">Взвешивание данных</h3>
+        <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">К настройке кросс‑таблицы</a>
+      </div>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <div class="row">
+        <div class="col-lg-6">
+          <div class="card shadow-sm mb-3">
+            <div class="card-header">
+              Переменные для взвешивания
+            </div>
+            <div class="card-body">
+              <div style="max-height: 420px; overflow-y: auto;" id="weightVarsList">
+                {% for col in columns %}
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="weight_vars" value="{{ col }}" form="wForm" id="w_{{ loop.index }}">
+                    <label class="form-check-label" for="w_{{ loop.index }}">{{ col }}</label>
+                  </div>
+                {% endfor %}
+              </div>
+
+              <div class="mt-2 d-flex gap-2">
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll('weightVarsList')">
+                  Выбрать все
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearAll('weightVarsList')">
+                  Очистить
+                </button>
+              </div>
+              <div class="form-text mt-2">
+                Ограничение: до 10 переменных.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-6">
+          <div class="card shadow-sm mb-3">
+            <div class="card-header">
+              Параметры кросс‑взвешивания
+            </div>
+            <div class="card-body">
+              <form id="wForm" method="post" enctype="multipart/form-data">
+                <div class="mb-3">
+                  <label class="form-label">Тип взвешивания</label>
+                  <select class="form-select" name="weighting_type" id="weightingType" onchange="toggleWeightingType()">
+                    <option value="cross" selected>Кросс‑взвешивание</option>
+                    <option value="sequential">Последовательное взвешивание</option>
+                  </select>
+                  <div class="form-text">
+                    Для sequential удобнее использовать шаблон Excel.
+                  </div>
+                </div>
+
+                <div id="crossInputs">
+                  <div class="mb-3">
+                  <label class="form-label">Целевые доли (text)</label>
+                  <textarea class="form-control" name="targets_text" rows="6" placeholder="Например: M=48, F=52 или M:0.48, F:0.52"></textarea>
+                  <div class="form-text">
+                    Либо загрузите Excel с колонками категорий и значений долей.
+                  </div>
+                </div>
+
+                  <div class="mb-3">
+                  <label class="form-label">Или файл с целями (xlsx/xls)</label>
+                  <input class="form-control" type="file" name="targets_file" accept=".xlsx,.xls">
+                </div>
+
+                  <div class="d-flex gap-2 flex-wrap">
+                    <button type="submit" name="action" value="template" class="btn btn-outline-primary">
+                      Скачать шаблон targets
+                    </button>
+                    <button type="submit" name="action" value="weigh" class="btn btn-primary">
+                      Взвесить и перейти к расчету
+                    </button>
+                  </div>
+                </div>
+
+                <div id="sequentialInputs" style="display: none;">
+                  <div class="mb-3">
+                    <button type="submit" name="action" value="template" class="btn btn-outline-primary w-100">
+                      Скачать шаблон Excel для sequential
+                    </button>
+                    <div class="form-text mt-2">
+                      В файле будет по одному листу на каждую выбранную переменную (Category / Targets).
+                    </div>
+                  </div>
+
+                  <div class="mb-3">
+                    <label class="form-label">Загрузите заполненный Excel</label>
+                    <input class="form-control" type="file" name="targets_file" accept=".xlsx,.xls">
+                  </div>
+
+                  <button type="submit" name="action" value="weigh" class="btn btn-primary w-100">
+                    Взвесить и перейти к расчету
+                  </button>
+                </div>
+
+                <div class="form-text mt-3">
+                  Базовые правила как в telegram bot: веса ограничиваются (0.3..3.0) и нормируются по среднему.
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      function selectAll(containerId) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        const inputs = container.querySelectorAll('input[type="checkbox"][name="weight_vars"]');
+        inputs.forEach((el) => (el.checked = true));
+      }
+      function clearAll(containerId) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        const inputs = container.querySelectorAll('input[type="checkbox"][name="weight_vars"]');
+        inputs.forEach((el) => (el.checked = false));
+      }
+
+      function toggleWeightingType() {
+        const type = document.getElementById('weightingType').value;
+        const crossInputs = document.getElementById('crossInputs');
+        const sequentialInputs = document.getElementById('sequentialInputs');
+        if (!crossInputs || !sequentialInputs) return;
+        if (type === 'sequential') {
+          crossInputs.style.display = 'none';
+          sequentialInputs.style.display = 'block';
+        } else {
+          crossInputs.style.display = 'block';
+          sequentialInputs.style.display = 'none';
+        }
+      }
+
+      toggleWeightingType();
+    </script>
+  </body>
+</html>
+

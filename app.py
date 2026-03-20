@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple
@@ -18,6 +19,7 @@ from flask import (
     flash,
 )
 import math
+from werkzeug.datastructures import FileStorage
 
 try:
     import pyreadstat  # type: ignore
@@ -235,6 +237,356 @@ def build_crosstab(
     return table_df, significance
 
 
+# =========================
+# Weighting (bot logic)
+# =========================
+
+TRIM_MIN = 0.3
+TRIM_MAX = 3.0
+MAX_VARS = 10
+MAX_CATS_PER_DIM = 60  # for safety (as in the telegram bot)
+NORMALIZE_MEAN_1 = True
+
+
+def create_cross_variable(df: pd.DataFrame, vars_list: List[str]) -> pd.Series:
+    """Creates cross variable as in telegram weighting bot: 'A × B × C'."""
+    if len(vars_list) == 1:
+        return df[vars_list[0]].astype(str)
+    cross_var = df[vars_list[0]].astype(str)
+    for var in vars_list[1:]:
+        cross_var = cross_var + " × " + df[var].astype(str)
+    return cross_var
+
+
+def parse_targets_input(text: str, categories: List[str]) -> Dict[str, float]:
+    """
+    Parse text like:
+      - "M=48, F=52" (percent)
+      - "M:0.48, F:0.52" (shares)
+    Returns normalized dict {category: share(0..1)} with sum=1.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("пустой ввод")
+
+    norm = raw.replace("\n", " ")
+    pairs = re.split(r"[;,|]", norm)
+    out: Dict[str, float] = {}
+    cats_lower = [c.lower() for c in categories]
+
+    def to_float(v: str) -> float:
+        v = v.strip().replace("%", "")
+        v = v.replace(",", ".")
+        try:
+            return float(v)
+        except Exception:
+            raise ValueError(f"некорректное число: '{v}'")
+
+    # If it's just numbers separated by delimiters (no explicit keys)
+    if all("=" not in p and ":" not in p for p in pairs):
+        nums = [to_float(p) for p in pairs if p.strip()]
+        if len(nums) != len(categories):
+            raise ValueError(
+                f"ожидалось {len(categories)} чисел (для категорий: {', '.join(categories)}), получили {len(nums)}"
+            )
+        s = sum(nums)
+        vals = [n / 100.0 if 95 <= s <= 105 else n for n in nums]
+        s2 = sum(vals)
+        if s2 <= 0:
+            raise ValueError("сумма долей должна быть > 0")
+        vals = [v / s2 for v in vals]
+        return {cat: vals[i] for i, cat in enumerate(categories)}
+
+    # key=value or key:value
+    for p in pairs:
+        if not p.strip():
+            continue
+        if "=" in p:
+            key, val = p.split("=", 1)
+        elif ":" in p:
+            key, val = p.split(":", 1)
+        else:
+            raise ValueError(f"не распознан фрагмент: '{p.strip()}' (ожидается cat=val)")
+
+        key = key.strip()
+        valf = to_float(val)
+
+        if key.lower() in cats_lower:
+            cat = categories[cats_lower.index(key.lower())]
+        else:
+            if key not in categories:
+                raise ValueError(f"категория '{key}' отсутствует. Доступные: {', '.join(categories)}")
+            cat = key
+
+        out[cat] = valf
+
+    s = sum(out.values())
+    # If it looks like percent
+    if 95 <= s <= 105:
+        out = {k: v / 100.0 for k, v in out.items()}
+        s = sum(out.values())
+
+    if set(out.keys()) != set(categories):
+        missing = [c for c in categories if c not in out]
+        extra = [c for c in out if c not in categories]
+        msg = []
+        if missing:
+            msg.append("нет значений для: " + ", ".join(missing))
+        if extra:
+            msg.append("лишние категории: " + ", ".join(extra))
+        raise ValueError("; ".join(msg))
+
+    if s <= 0:
+        raise ValueError("сумма долей должна быть > 0")
+
+    out = {k: v / s for k, v in out.items()}
+    return out
+
+
+def read_targets_from_excel(file_storage: FileStorage) -> Dict[str, float]:
+    df = pd.read_excel(file_storage)
+
+    category_col = None
+    target_col = None
+
+    category_names = ["category", "категория", "cat", "name", "название", "группа", "group"]
+    target_names = [
+        "target",
+        "targets",
+        "таргет",
+        "таргеты",
+        "цель",
+        "доля",
+        "share",
+        "percent",
+        "процент",
+        "value",
+        "значение",
+    ]
+
+    for col in df.columns:
+        if str(col).lower().strip() in category_names:
+            category_col = col
+            break
+
+    for col in df.columns:
+        if str(col).lower().strip() in target_names:
+            target_col = col
+            break
+
+    if category_col is None or target_col is None:
+        cols = list(df.columns)
+        if len(cols) >= 2:
+            category_col = cols[0]
+            target_col = cols[1]
+        else:
+            raise ValueError(f"Недостаточно колонок в файле. Найдено: {cols}")
+
+    targets: Dict[str, float] = {}
+    for _, row in df.iterrows():
+        cat = str(row[category_col]).strip()
+        try:
+            target = float(row[target_col])
+        except (ValueError, TypeError):
+            continue
+        targets[cat] = target
+
+    if not targets:
+        raise ValueError("Не удалось прочитать ни одной пары категория-значение")
+
+    total = sum(targets.values())
+    if total > 0:
+        targets = {k: v / total for k, v in targets.items()}
+
+    return targets
+
+
+def create_targets_template_xlsx(categories: List[str], current_shares: pd.Series, out_path: str) -> None:
+    template_data = []
+    for category in sorted(categories):
+        template_data.append(
+            {
+                "Category": category,
+                "Targets": float(current_shares.get(category, 0.0)),
+            }
+        )
+    template_df = pd.DataFrame(template_data)
+    template_df.to_excel(out_path, index=False, engine="openpyxl")
+
+
+def clean_sheet_name(name: str) -> str:
+    """Очистка названия листа Excel."""
+    invalid_chars = r"[\\/:*?\[\]]"
+    clean_name = re.sub(invalid_chars, "_", str(name))
+    clean_name = clean_name.strip().rstrip(".")
+    clean_name = clean_name[:31]
+    return clean_name or "Sheet"
+
+
+def create_sequential_targets_template_xlsx(
+    df: pd.DataFrame,
+    vars_list: List[str],
+    out_path: str,
+) -> None:
+    """
+    Делает Excel workbook: по листу на каждую переменную.
+    Каждый лист: Category / Targets (текущие доли как стартовые значения).
+    """
+    import pandas as _pd
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for var in vars_list:
+            series = df[var].dropna().astype(str)
+            categories = sorted(series.unique().tolist())
+            current_shares = series.value_counts(normalize=True).sort_index()
+            template_data = []
+            for cat in categories:
+                template_data.append({"Category": cat, "Targets": float(current_shares.get(cat, 0.0))})
+            template_df = _pd.DataFrame(template_data)
+            writer.sheets  # touch to ensure writer init
+            template_df.to_excel(writer, sheet_name=clean_sheet_name(var), index=False)
+
+
+def _read_targets_from_dataframe(df_targets: pd.DataFrame) -> Dict[str, float]:
+    category_col = None
+    target_col = None
+
+    category_names = ["category", "категория", "cat", "name", "название", "группа", "group"]
+    target_names = [
+        "target",
+        "targets",
+        "таргет",
+        "таргеты",
+        "цель",
+        "доля",
+        "share",
+        "percent",
+        "процент",
+        "value",
+        "значение",
+    ]
+
+    for col in df_targets.columns:
+        if str(col).lower().strip() in category_names:
+            category_col = col
+            break
+    for col in df_targets.columns:
+        if str(col).lower().strip() in target_names:
+            target_col = col
+            break
+
+    if category_col is None or target_col is None:
+        cols = list(df_targets.columns)
+        if len(cols) >= 2:
+            category_col = cols[0]
+            target_col = cols[1]
+        else:
+            raise ValueError(f"Недостаточно колонок в sheet: {cols}")
+
+    targets: Dict[str, float] = {}
+    for _, row in df_targets.iterrows():
+        cat = str(row[category_col]).strip()
+        try:
+            target = float(row[target_col])
+        except (ValueError, TypeError):
+            continue
+        targets[cat] = target
+
+    if not targets:
+        raise ValueError("Не удалось прочитать ни одной пары категория-значение на sheet")
+
+    total = sum(targets.values())
+    if 95 <= total <= 105:
+        # похоже на проценты
+        targets = {k: v / 100.0 for k, v in targets.items()}
+    else:
+        targets = {k: v / total for k, v in targets.items()} if total > 0 else targets
+
+    return targets
+
+
+def read_sequential_targets_from_excel(file_storage: FileStorage, vars_list: List[str]) -> Dict[str, Dict[str, float]]:
+    workbook = pd.read_excel(file_storage, sheet_name=None)
+
+    out: Dict[str, Dict[str, float]] = {}
+    for var in vars_list:
+        sheet = clean_sheet_name(var)
+        if sheet not in workbook:
+            raise ValueError(f"В файле нет sheet '{sheet}' для переменной '{var}'")
+        df_sheet = workbook[sheet]
+        out[var] = _read_targets_from_dataframe(df_sheet)
+
+    # Validate that each sheet contains exactly the same set of categories as in data
+    # (слабая проверка: гарантируем, что хотя бы все заданные категории есть в данных).
+    return out
+
+
+def sequential_weight(df: pd.DataFrame, vars_list: List[str], targets_by_var: Dict[str, Dict[str, float]]) -> pd.DataFrame:
+    """
+    Реплика логики sequential-взвешивания из Telegram-бота:
+    веса корректируются по очереди переменных, используя unweighted value_counts(normalize=True).
+    """
+    weights = pd.Series(1.0, index=df.index)
+
+    for var in vars_list:
+        # категории в данных (как строки)
+        current_shares = df[var].dropna().astype(str).value_counts(normalize=True)
+        if var not in targets_by_var:
+            raise ValueError(f"Нет targets для переменной '{var}'")
+
+        targets = targets_by_var[var]
+
+        for category, target_share in targets.items():
+            current_share = float(current_shares.get(str(category), 0.0))
+            if current_share == 0:
+                raise ValueError(f"Категория '{category}' отсутствует/нулевая доля в данных для '{var}'")
+            adjustment = float(target_share) / current_share
+            mask = df[var].astype(str) == str(category)
+            weights.loc[mask] *= adjustment
+
+    weights = weights.clip(TRIM_MIN, TRIM_MAX)
+    if NORMALIZE_MEAN_1 and float(weights.mean()) != 0.0:
+        weights = weights / float(weights.mean())
+
+    df_out = df.copy()
+    df_out["weight"] = weights.values
+    return df_out
+
+
+def cross_weight(df: pd.DataFrame, vars_list: List[str], targets: Dict[str, float]) -> pd.DataFrame:
+    cross_var = create_cross_variable(df, vars_list)
+    df2 = df.copy()
+    df2["_cross_var"] = cross_var.astype(str)
+
+    present = set(df2["_cross_var"].unique())
+    declared = set(targets.keys())
+    missing = declared - present
+    if missing:
+        raise ValueError(f"В данных отсутствуют категории: {', '.join(sorted(missing))}")
+
+    weights = pd.Series(1.0, index=df2.index)
+    current_shares = df2["_cross_var"].value_counts(normalize=True)
+
+    for category, target_share in targets.items():
+        current_share = float(current_shares.get(category, 0.0))
+        if current_share == 0:
+            raise ValueError(f"Категория '{category}' отсутствует в данных или имеет нулевую долю")
+        adjustment = float(target_share) / current_share
+        mask = df2["_cross_var"] == category
+        weights.loc[mask] *= adjustment
+
+    weights = weights.clip(TRIM_MIN, TRIM_MAX)
+    if NORMALIZE_MEAN_1 and float(weights.mean()) != 0.0:
+        weights = weights / float(weights.mean())
+
+    cross_var_name = " × ".join(vars_list)
+    df_out = df2.drop(columns=["_cross_var"], errors="ignore")
+    df_out["weight"] = weights.values
+    # Bot adds a cross variable name for diagnostics; it doesn't harm analysis.
+    df_out[cross_var_name] = cross_var.astype(str)
+    return df_out
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
@@ -252,6 +604,7 @@ def index():
         key = uuid.uuid4().hex
         DATASTORE[key] = df
         session["data_key"] = key
+        session["active_data_key"] = key
 
         return redirect(url_for("configure"))
 
@@ -260,7 +613,7 @@ def index():
 
 @app.route("/configure", methods=["GET", "POST"])
 def configure():
-    key = session.get("data_key")
+    key = session.get("active_data_key") or session.get("data_key")
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
@@ -340,7 +693,7 @@ def results():
 
 @app.route("/download-excel")
 def download_excel():
-    key = session.get("data_key")
+    key = session.get("active_data_key") or session.get("data_key")
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
@@ -363,6 +716,127 @@ def download_excel():
         download_name="survey_analysis.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.route("/weight", methods=["GET", "POST"])
+def weight_page():
+    key = session.get("data_key")
+    if not key or key not in DATASTORE:
+        flash("Данные не найдены, загрузите файл заново.", "error")
+        return redirect(url_for("index"))
+
+    df = DATASTORE[key]
+    columns = list(df.columns)
+
+    if request.method == "POST":
+        weight_vars = request.form.getlist("weight_vars")
+        weighting_type = request.form.get("weighting_type", "cross")
+        action = request.form.get("action", "weigh")
+
+        if not weight_vars:
+            flash("Выберите хотя бы одну переменную для взвешивания.", "error")
+            return redirect(url_for("weight_page"))
+
+        if len(weight_vars) > MAX_VARS:
+            flash(f"Можно выбрать не более {MAX_VARS} переменных.", "error")
+            return redirect(url_for("weight_page"))
+
+        file_targets = request.files.get("targets_file")
+        targets_text = request.form.get("targets_text", "")
+
+        if weighting_type == "cross":
+            cross_var = create_cross_variable(df, weight_vars)
+            categories = sorted(cross_var.dropna().unique().tolist())
+            if len(categories) > MAX_CATS_PER_DIM:
+                flash(
+                    f"Слишком много категорий ({len(categories)}) для кросс‑взвешивания. Максимум: {MAX_CATS_PER_DIM}.",
+                    "error",
+                )
+                return redirect(url_for("weight_page"))
+            current_shares = cross_var.value_counts(normalize=True).sort_index()
+
+            if action == "template":
+                out_path = f"/tmp/targets_template_{uuid.uuid4().hex}.xlsx"
+                create_targets_template_xlsx(categories, current_shares, out_path)
+                return send_file(
+                    out_path,
+                    as_attachment=True,
+                    download_name="targets_template.xlsx",
+                    mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+            # action == "weigh"
+            targets: Dict[str, float] = {}
+            try:
+                if file_targets and file_targets.filename:
+                    targets = read_targets_from_excel(file_targets)
+                    missing = set(categories) - set(targets.keys())
+                    extra = set(targets.keys()) - set(categories)
+                    if missing or extra:
+                        msg = []
+                        if missing:
+                            msg.append("нет значений для: " + ", ".join(sorted(missing)))
+                        if extra:
+                            msg.append("лишние категории: " + ", ".join(sorted(extra)))
+                        raise ValueError("; ".join(msg))
+                else:
+                    targets = parse_targets_input(targets_text, categories)
+            except Exception as exc:
+                flash(f"Ошибка с целевыми значениями: {exc}", "error")
+                return redirect(url_for("weight_page"))
+
+            try:
+                df_weighted = cross_weight(df, weight_vars, targets)
+            except Exception as exc:
+                flash(f"Ошибка взвешивания: {exc}", "error")
+                return redirect(url_for("weight_page"))
+
+        elif weighting_type == "sequential":
+            # Ограничиваем размер категорий каждой переменной (чтобы шаблон был не слишком огромным)
+            for var in weight_vars:
+                cats = df[var].dropna().astype(str).unique()
+                if len(cats) > MAX_CATS_PER_DIM:
+                    flash(
+                        f"Слишком много категорий ({len(cats)}) для переменной '{var}'. Максимум: {MAX_CATS_PER_DIM}.",
+                        "error",
+                    )
+                    return redirect(url_for("weight_page"))
+
+            if action == "template":
+                out_path = f"/tmp/sequential_targets_template_{uuid.uuid4().hex}.xlsx"
+                create_sequential_targets_template_xlsx(df, weight_vars, out_path)
+                return send_file(
+                    out_path,
+                    as_attachment=True,
+                    download_name="sequential_targets_template.xlsx",
+                    mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+            # action == "weigh"
+            if not (file_targets and file_targets.filename):
+                flash("Для sequential загрузите Excel с targets_file.", "error")
+                return redirect(url_for("weight_page"))
+
+            try:
+                targets_by_var = read_sequential_targets_from_excel(file_targets, weight_vars)
+                df_weighted = sequential_weight(df, weight_vars, targets_by_var)
+            except Exception as exc:
+                flash(f"Ошибка взвешивания: {exc}", "error")
+                return redirect(url_for("weight_page"))
+
+        else:
+            flash("Неизвестный тип взвешивания.", "error")
+            return redirect(url_for("weight_page"))
+
+        new_key = uuid.uuid4().hex
+        DATASTORE[new_key] = df_weighted
+        session["active_data_key"] = new_key
+
+        pretty_type = "кросс‑взвешивание" if weighting_type == "cross" else "последовательное взвешивание"
+        flash(f"Взвешивание завершено ({pretty_type}). Теперь можно посчитать кросс‑таблицы.", "success")
+        return redirect(url_for("configure"))
+
+    return render_template("weight.html", columns=columns)
 
 
 if __name__ == "__main__":
