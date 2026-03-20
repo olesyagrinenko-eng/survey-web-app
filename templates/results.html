@@ -20,7 +20,11 @@
         <h3 class="mb-0">Результаты анализа</h3>
         <div class="btn-group">
           <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">Изменить настройки</a>
-          <a href="{{ url_for('download_excel') }}" class="btn btn-outline-primary btn-sm">Скачать Excel</a>
+          {% if excel_ready %}
+            <a href="{{ url_for('download_excel') }}" class="btn btn-outline-primary btn-sm">Скачать Excel</a>
+          {% else %}
+            <span class="btn btn-outline-primary btn-sm disabled" aria-disabled="true" title="Excel пока не подготовлен">Скачать Excel</span>
+          {% endif %}
           <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Новый файл</a>
         </div>
       </div>

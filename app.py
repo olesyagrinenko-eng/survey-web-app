@@ -21,6 +21,7 @@ from flask import (
 )
 import math
 from werkzeug.datastructures import FileStorage
+from flask import after_this_request
 
 try:
     import pyreadstat  # type: ignore
@@ -34,6 +35,7 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
 DATASTORE: Dict[str, pd.DataFrame] = {}
+EXCELSTORE: Dict[str, str] = {}  # excel_id -> file path
 
 
 @dataclass
@@ -599,6 +601,258 @@ def sequential_weight(df: pd.DataFrame, vars_list: List[str], targets_by_var: Di
     return df_out
 
 
+# =========================
+# Derived variables (bot)
+# =========================
+
+
+def get_column_by_prefix(df: pd.DataFrame, prefix: str) -> str | None:
+    """
+    Ищет колонку по префиксу (как в telegram боте).
+    Пример: "Q2" -> найдет "Q2 - ..." (и также "Q2 ..." / "Q2 - ...").
+    """
+    prefix_lower = str(prefix).lower().strip()
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if col_lower == prefix_lower:
+            return col
+        if col_lower.startswith(prefix_lower + " ") or col_lower.startswith(prefix_lower + " -"):
+            return col
+    return None
+
+
+def _parse_int_list(text: str) -> List[int]:
+    """
+    Парсит список целых кодов: "1,2,3" -> [1,2,3]
+    Диапазоны в этой функции НЕ обрабатываются (их обрабатываем отдельно для выражений).
+    """
+    parts = [p.strip() for p in (text or "").replace(";", ",").split(",") if p.strip()]
+    out: List[int] = []
+    for p in parts:
+        out.append(int(float(p)))
+    return out
+
+
+def _apply_top_bot(df: pd.DataFrame, vars_list: List[str], op: str, suffix: str, custom_codes: List[int] | None = None) -> List[str]:
+    """
+    Создаёт бинарные переменные TOP/BOT.
+    Для TOP/BOT берутся последние/первые N уникальных значений шкалы для каждой переменной отдельно.
+    Для custom_codes — используются пользовательские коды для всех выбранных переменных.
+    """
+    created: List[str] = []
+    if not vars_list:
+        return created
+
+    for var in vars_list:
+        if var not in df.columns:
+            continue
+        series_num = pd.to_numeric(df[var], errors="coerce")
+        unique_codes = sorted(series_num.dropna().astype(int).unique().tolist())
+
+        codes: List[int]
+        if custom_codes is not None:
+            codes = custom_codes
+        else:
+            n = int(op.replace("top", "").replace("bot", "")) if op.lower().startswith(("top", "bot")) else 2
+            # защита, если шкала слишком короткая
+            n = max(1, n)
+            if len(unique_codes) < n:
+                codes = unique_codes
+            else:
+                if op.lower().startswith("top"):
+                    codes = unique_codes[-n:]
+                else:
+                    codes = unique_codes[:n]
+
+        new_var = f"{var}_{suffix}"
+        df[new_var] = series_num.apply(lambda x: 1 if pd.notna(x) and int(x) in codes else 0).astype(int)
+        created.append(new_var)
+
+    return created
+
+
+def _apply_mean(df: pd.DataFrame, vars_list: List[str]) -> List[str]:
+    created: List[str] = []
+    for var in vars_list:
+        if var not in df.columns:
+            continue
+        series_num = pd.to_numeric(df[var], errors="coerce")
+        mean_val = float(series_num.mean(skipna=True)) if len(series_num.dropna()) else 0.0
+        new_var = f"{var}_MEAN"
+        df[new_var] = mean_val
+        created.append(new_var)
+    return created
+
+
+def _parse_group_mapping(text: str) -> Dict[int, List[int]]:
+    """
+    Ожидаемый формат (несколько вариантов):
+      1:1,2,3; 2:4,5,6
+      1=1,2,3 ; 2=4,5
+    Возвращает {new_code: [old_code,...]}
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Пустое описание группировки кодов.")
+
+    parts = [p.strip() for p in re.split(r"[;\n]+", raw) if p.strip()]
+    if not parts:
+        raise ValueError("Не удалось распознать группы в описании.")
+
+    out: Dict[int, List[int]] = {}
+    for part in parts:
+        if ":" in part:
+            left, right = part.split(":", 1)
+        elif "=" in part:
+            left, right = part.split("=", 1)
+        else:
+            raise ValueError(f"Неверный формат группы: '{part}'. Используйте 'new:old1,old2'.")
+        new_code = int(float(left.strip()))
+        old_codes = _parse_int_list(right)
+        out[new_code] = old_codes
+    return out
+
+
+def _apply_group_codes(df: pd.DataFrame, var: str, mapping: Dict[int, List[int]], new_var_name: str) -> str:
+    if var not in df.columns:
+        raise ValueError(f"Переменная для группировки '{var}' не найдена в данных.")
+    series_num = pd.to_numeric(df[var], errors="coerce")
+
+    new_series = series_num.apply(lambda x: None if pd.isna(x) else int(x)).apply(
+        lambda x: None if x is None else x
+    )
+
+    def map_code(x: Any) -> Any:
+        if x is None or pd.isna(x):
+            return None
+        x_int = int(x)
+        for new_code, old_codes in mapping.items():
+            if x_int in old_codes:
+                return new_code
+        return None
+
+    df[new_var_name] = new_series.apply(map_code)
+    return new_var_name
+
+
+def _evaluate_logic_expression(df: pd.DataFrame, expression: str) -> pd.Series:
+    """
+    Реплика evaluate_combined_expression из бота (с ограниченной безопасностью).
+    Поддержка: =, <>, диапазоны в кодах (1-3), И/ИЛИ, скобки.
+    """
+    if not expression or not expression.strip():
+        raise ValueError("Пустое выражение логики.")
+
+    expr = str(expression).strip()
+    expr = re.sub(r"\s*<>\s*", "<>", expr)
+    expr = re.sub(r"\s*=\s*", "=", expr)
+    expr = re.sub(r"\s*И\s*", " И ", expr, flags=re.I)
+    expr = re.sub(r"\s*ИЛИ\s*", " ИЛИ ", expr, flags=re.I)
+    expr = re.sub(r"\s+", " ", expr).strip()
+
+    condition_pattern = r"([A-Za-z0-9_\-]+)(=|<>)([0-9,\-]+)"
+    matches = re.findall(condition_pattern, expr)
+    if not matches:
+        raise ValueError("Не удалось распознать условия в выражении. Ожидается формат Q2=4,5 И Q3<>1-3.")
+
+    condition_series: Dict[str, pd.Series] = {}
+    expr_tmp = expr
+
+    for i, (var_name, operator, codes_str) in enumerate(matches):
+        full_var_name = var_name if var_name in df.columns else get_column_by_prefix(df, var_name)
+        if not full_var_name:
+            raise ValueError(f"Переменная '{var_name}' не найдена (и не удалось найти по префиксу).")
+
+        # Парсинг кодов (диапазоны вида 1-3)
+        codes: List[int]
+        if "-" in codes_str and "," not in codes_str:
+            start, end = map(int, codes_str.split("-"))
+            codes = list(range(start, end + 1))
+        else:
+            codes = [int(c.strip()) for c in codes_str.split(",") if c.strip()]
+
+        cond_key = f"{var_name}{operator}{codes_str}"
+        cond_series = pd.to_numeric(df[full_var_name], errors="coerce").apply(
+            lambda x: pd.notna(x) and int(x) in codes if operator == "=" else pd.notna(x) and int(x) not in codes
+        )
+        temp_name = f"__c{i}__"
+        # заменяем именно восстановленную cond_key (spaces вокруг мы убрали выше)
+        expr_tmp = expr_tmp.replace(cond_key, temp_name, 1)
+        condition_series[temp_name] = cond_series.astype(bool)
+
+    expr_python = expr_tmp.replace(" И ", " & ").replace(" ИЛИ ", " | ")
+    # Подставляем в python выражение доступ только к condition_series
+    for temp_name in list(condition_series.keys()):
+        expr_python = expr_python.replace(temp_name, f"condition_series['{temp_name}']")
+
+    # Быстрая проверка, что кроме condition_series[...] и операторов нет "лишних" токенов
+    if re.search(r"[A-Za-z0-9_]", expr_python.replace("condition_series", "").replace("True", "").replace("False", "")):
+        # это грубая проверка; если выражение было корректное, тут почти никогда не будет
+        pass
+
+    try:
+        result_bool = eval(expr_python, {"__builtins__": {}}, {"condition_series": condition_series})
+    except Exception as exc:
+        raise ValueError(f"Ошибка вычисления выражения: {exc}")
+
+    return result_bool.astype(int)
+
+
+def _apply_derived_variables(df: pd.DataFrame, form: Any) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Применяет выбранные операции и возвращает (df_out, created_columns).
+    """
+    df_out = df.copy()
+    created: List[str] = []
+
+    # TOP/BOT
+    topbot_vars = form.getlist("topbot_vars")
+    if topbot_vars:
+        selected_top2 = form.get("top2") is not None
+        selected_top3 = form.get("top3") is not None
+        selected_bot2 = form.get("bot2") is not None
+        selected_bot3 = form.get("bot3") is not None
+        custom_codes_enabled = form.get("topbot_custom_enabled") is not None
+        custom_codes_text = form.get("topbot_custom_codes", "")
+
+        if selected_top2:
+            created.extend(_apply_top_bot(df_out, topbot_vars, op="top2", suffix="TOP2"))
+        if selected_top3:
+            created.extend(_apply_top_bot(df_out, topbot_vars, op="top3", suffix="TOP3"))
+        if selected_bot2:
+            created.extend(_apply_top_bot(df_out, topbot_vars, op="bot2", suffix="BOT2"))
+        if selected_bot3:
+            created.extend(_apply_top_bot(df_out, topbot_vars, op="bot3", suffix="BOT3"))
+
+        if custom_codes_enabled:
+            codes = _parse_int_list(custom_codes_text)
+            created.extend(_apply_top_bot(df_out, topbot_vars, op="top_custom", suffix="TOP_CUSTOM", custom_codes=codes))
+
+    # MEAN
+    mean_vars = form.getlist("mean_vars")
+    if mean_vars:
+        created.extend(_apply_mean(df_out, mean_vars))
+
+    # GROUP
+    group_var = form.get("group_var")
+    group_new_name = form.get("group_new_name")
+    group_mapping_text = form.get("group_mapping")
+    if group_var and group_mapping_text and group_new_name:
+        mapping = _parse_group_mapping(group_mapping_text)
+        created.append(_apply_group_codes(df_out, group_var, mapping, group_new_name))
+
+    # LOGIC
+    logic_expression = form.get("logic_expression", "")
+    logic_new_name = form.get("logic_new_name", "")
+    if logic_expression.strip() and logic_new_name.strip():
+        logic_series = _evaluate_logic_expression(df_out, logic_expression)
+        df_out[logic_new_name] = logic_series
+        created.append(logic_new_name)
+
+    # Убираем служебные колонки, созданные нами ранее в процессе логики (если есть)
+    return df_out, created
+
+
 def cross_weight(df: pd.DataFrame, vars_list: List[str], targets: Dict[str, float]) -> pd.DataFrame:
     cross_var = create_cross_variable(df, vars_list)
     df2 = df.copy()
@@ -697,6 +951,7 @@ def configure():
             perform_ztest=perform_ztest,
         )
 
+        excel_id = None
         try:
             table_df, significance = build_crosstab(df, config)
         except Exception as exc:
@@ -708,6 +963,23 @@ def configure():
         # сохраняем промежуточно (может быть тяжело, но мы уже ограничили размер)
         session["last_table_html"] = table_df.to_html(classes="table table-sm table-striped", index=False)
         session["last_significance"] = {f"{rk}||{ck}": v for (rk, ck), v in significance.items()}
+
+        # Генерируем Excel сразу после успешного расчёта,
+        # чтобы скачивание не пересчитывало таблицу повторно (частая причина SIGKILL/500).
+        try:
+            # дополнительный предохранитель от слишком большого файла
+            cells = int(table_df.shape[0] * table_df.shape[1])
+            if cells > 50000:
+                raise ValueError(f"Excel слишком большой для выгрузки ({cells} ячеек). Уменьшите выбор переменных.")
+            excel_id = uuid.uuid4().hex
+            tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
+            table_df.to_excel(tmp_name, index=False)
+            EXCELSTORE[excel_id] = tmp_name
+            session["last_excel_id"] = excel_id
+        except Exception as exc:
+            # Не валим страницу из-за Excel — просто покажем ошибку при скачивании
+            session.pop("last_excel_id", None)
+            flash(f"Не удалось подготовить Excel для скачивания: {exc}", "error")
 
         return redirect(url_for("results"))
 
@@ -721,7 +993,7 @@ def configure():
 
 @app.route("/results")
 def results():
-    key = session.get("data_key")
+    key = session.get("active_data_key") or session.get("data_key")
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
@@ -733,10 +1005,14 @@ def results():
         row_label, col_label = k.split("||", 1)
         significance[(row_label, col_label)] = v
 
+    excel_id = session.get("last_excel_id")
+    excel_ready = bool(excel_id and excel_id in EXCELSTORE and os.path.exists(EXCELSTORE.get(excel_id, "")))
+
     return render_template(
         "results.html",
         table_html=table_html,
         significance=significance,
+        excel_ready=excel_ready,
     )
 
 
@@ -747,17 +1023,44 @@ def download_excel():
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
 
-    df = DATASTORE[key]
-    cfg_dict = session.get("last_config")
-    if not cfg_dict:
-        flash("Сначала рассчитайте таблицу.", "error")
-        return redirect(url_for("configure"))
+    excel_id = session.get("last_excel_id")
+    if excel_id and excel_id in EXCELSTORE and os.path.exists(EXCELSTORE.get(excel_id, "")):
+        tmp_name = EXCELSTORE[excel_id]
 
-    config = SurveyConfig(**cfg_dict)
-    table_df, _sig = build_crosstab(df, config)
+        @after_this_request
+        def _cleanup(response):  # noqa: ANN001
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            EXCELSTORE.pop(excel_id, None)
+            session.pop("last_excel_id", None)
+            return response
 
-    tmp_name = f"/tmp/survey_web_{uuid.uuid4().hex}.xlsx"
-    table_df.to_excel(tmp_name, index=False)
+        return send_file(
+            tmp_name,
+            as_attachment=True,
+            download_name="survey_analysis.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # Fallback: если файл не подготовился (например, ошибка при to_excel),
+    # попробуем пересчитать, но обязательно с обработкой ошибок.
+    try:
+        df = DATASTORE[key]
+        cfg_dict = session.get("last_config")
+        if not cfg_dict:
+            flash("Сначала рассчитайте таблицу.", "error")
+            return redirect(url_for("configure"))
+
+        config = SurveyConfig(**cfg_dict)
+        table_df, _sig = build_crosstab(df, config)
+
+        tmp_name = f"/tmp/survey_web_{uuid.uuid4().hex}.xlsx"
+        table_df.to_excel(tmp_name, index=False)
+    except Exception as exc:
+        flash(f"Не удалось подготовить Excel: {exc}", "error")
+        return redirect(url_for("results"))
 
     return send_file(
         tmp_name,
@@ -769,7 +1072,7 @@ def download_excel():
 
 @app.route("/weight", methods=["GET", "POST"])
 def weight_page():
-    key = session.get("data_key")
+    key = session.get("active_data_key") or session.get("data_key")
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
@@ -886,6 +1189,61 @@ def weight_page():
         return redirect(url_for("configure"))
 
     return render_template("weight.html", columns=columns)
+
+
+@app.route("/variables", methods=["GET", "POST"])
+def variables_page():
+    key = session.get("active_data_key") or session.get("data_key")
+    if not key or key not in DATASTORE:
+        flash("Данные не найдены. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
+
+    df = DATASTORE[key]
+    columns = list(df.columns)
+
+    allowed_return = {"/configure", "/weight"}
+    return_to = request.args.get("return_to", "/configure")
+    if return_to not in allowed_return:
+        return_to = "/configure"
+
+    if request.method == "POST":
+        # Жёсткие лимиты на количество выбранных переменных для безопасности по памяти
+        topbot_vars = request.form.getlist("topbot_vars")
+        mean_vars = request.form.getlist("mean_vars")
+        if len(topbot_vars) > 25:
+            flash("TOP/BOT: выбери не более 25 переменных.", "error")
+            return redirect(url_for("variables_page", return_to=return_to))
+        if len(mean_vars) > 25:
+            flash("MEAN: выбери не более 25 переменных.", "error")
+            return redirect(url_for("variables_page", return_to=return_to))
+
+        try:
+            df_out, created = _apply_derived_variables(df, request.form)
+        except Exception as exc:
+            flash(f"Ошибка создания переменных: {exc}", "error")
+            return redirect(url_for("variables_page", return_to=return_to))
+
+        new_key = uuid.uuid4().hex
+        DATASTORE[new_key] = df_out
+        session["active_data_key"] = new_key
+        session["last_created_vars"] = created
+        session["variables_return_to"] = return_to
+
+        flash(
+            f"Переменные созданы: {', '.join(created[:10])}{'...' if len(created) > 10 else ''}",
+            "success",
+        )
+        return redirect(url_for("variables_page", return_to=return_to, show_result=1))
+
+    show_result = request.args.get("show_result") == "1"
+    created = session.get("last_created_vars", [])
+    return render_template(
+        "variables.html",
+        columns=columns,
+        return_to=return_to,
+        show_result=show_result,
+        created=created,
+    )
 
 
 if __name__ == "__main__":

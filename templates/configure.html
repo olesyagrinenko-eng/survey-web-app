@@ -26,6 +26,7 @@
           <div class="d-flex justify-content-between align-items-center mb-3">
             <h3 class="mb-0">Настройка анализа</h3>
             <div class="btn-group">
+              <a href="{{ url_for('variables_page', return_to='/configure') }}" class="btn btn-outline-secondary btn-sm">Создать переменные</a>
               <a href="{{ url_for('weight_page') }}" class="btn btn-outline-primary btn-sm">Сначала взвесить</a>
               <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Загрузить другой файл</a>
             </div>

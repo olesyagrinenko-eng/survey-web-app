@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Создание переменных</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div id="varOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.35); z-index:2000;">
+      <div style="height:100%; display:flex; align-items:center; justify-content:center;">
+        <div style="width:520px;">
+          <div class="alert alert-info mb-3" style="margin-bottom:12px;">
+            Создаю переменные… Это может занять несколько секунд.
+          </div>
+          <div class="progress" aria-label="Расчет в процессе">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="container py-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="mb-0">Создание переменных</h3>
+        <div class="btn-group">
+          <a href="{{ return_to }}" class="btn btn-outline-secondary btn-sm">Назад</a>
+        </div>
+      </div>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% if show_result %}
+        <div class="card shadow-sm mb-3">
+          <div class="card-body">
+            <h5 class="card-title">Результат</h5>
+            {% if created and created|length > 0 %}
+              <p class="mb-2"><strong>Созданы:</strong></p>
+              <div class="small text-muted" style="white-space: pre-wrap;">
+                {{ created | join(', ') }}
+              </div>
+            {% else %}
+              <p class="mb-0 text-muted">Новых переменных не создано.</p>
+            {% endif %}
+
+            <div class="d-flex gap-2 mt-3 flex-wrap">
+              <a href="{{ return_to }}" class="btn btn-primary">Перейти дальше</a>
+              <a href="{{ url_for('variables_page', return_to=return_to) }} " class="btn btn-outline-secondary">Создать ещё</a>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+
+      <form method="post" id="varsForm">
+        <div class="row">
+          <div class="col-lg-6">
+            <div class="card mb-3 shadow-sm">
+              <div class="card-header">TOP/BOT</div>
+              <div class="card-body">
+                <div class="mb-2">
+                  <div class="form-text">Выберите переменные (например Q2, Q3…)</div>
+                </div>
+                <div style="max-height: 300px; overflow-y:auto;" id="topbotVarsList">
+                  {% for c in columns %}
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="topbot_vars" value="{{ c }}" id="tb_{{ loop.index }}">
+                      <label class="form-check-label" for="tb_{{ loop.index }}">{{ c }}</label>
+                    </div>
+                  {% endfor %}
+                </div>
+                <div class="mt-2 d-flex gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll('topbotVarsList','topbot_vars')">Выбрать все</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearAll('topbotVarsList','topbot_vars')">Очистить</button>
+                </div>
+
+                <hr>
+
+                <div class="mb-2">
+                  <div class="form-text">Какие показатели создать</div>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="top2" id="top2" checked>
+                  <label class="form-check-label" for="top2">TOP-2</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="top3" id="top3">
+                  <label class="form-check-label" for="top3">TOP-3</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="bot2" id="bot2" checked>
+                  <label class="form-check-label" for="bot2">BOT-2</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="bot3" id="bot3">
+                  <label class="form-check-label" for="bot3">BOT-3</label>
+                </div>
+
+                <hr>
+
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="topbot_custom_enabled" id="topbot_custom_enabled">
+                  <label class="form-check-label" for="topbot_custom_enabled">Свои коды (создать TOP_CUSTOM)</label>
+                </div>
+                <div class="mt-2">
+                  <textarea class="form-control" name="topbot_custom_codes" rows="2" placeholder="Например: 4,5"></textarea>
+                  <div class="form-text">Коды будут использованы как набор включения для TOP_CUSTOM.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-6">
+            <div class="card mb-3 shadow-sm">
+              <div class="card-header">MEAN / GROUP / LOGIC</div>
+              <div class="card-body">
+                <div class="mb-3">
+                  <div class="form-text">MEAN: создаёт {var}_MEAN (среднее по всей выборке)</div>
+                  <div style="max-height: 140px; overflow-y:auto;" id="meanVarsList">
+                    {% for c in columns %}
+                      <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ c }}" id="m_{{ loop.index }}">
+                        <label class="form-check-label" for="m_{{ loop.index }}">{{ c }}</label>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+
+                <hr>
+
+                <div class="mb-3">
+                  <div class="form-text">Группировка кодов: создаёт категориальную переменную</div>
+                  <div class="mb-2">
+                    <label class="form-label">Переменная для группировки</label>
+                    <select class="form-select" name="group_var">
+                      <option value="">(не выбрано)</option>
+                      {% for c in columns %}
+                        <option value="{{ c }}">{{ c }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label">Имя новой переменной</label>
+                    <input class="form-control" type="text" name="group_new_name" placeholder="Например: Q_GROUPED">
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label">Маппинг (new:old1,old2)</label>
+                    <textarea class="form-control" name="group_mapping" rows="3" placeholder="Например:
+1:1,2,3
+2:4,5,6"></textarea>
+                  </div>
+                  <div class="form-text">Да, по такой переменной можно считать проценты: она появится как обычная категориальная переменная (0/1 или новые коды).</div>
+                </div>
+
+                <hr>
+
+                <div class="mb-3">
+                  <div class="form-text">Логика (И/ИЛИ/скобки). Пример: Q2=4,5 И Q3&lt;&gt;1-3</div>
+                  <div class="mb-2">
+                    <label class="form-label">Выражение</label>
+                    <textarea class="form-control" name="logic_expression" rows="3" placeholder="Q2=4,5 И (Q3=4 ИЛИ Q3&lt;&gt;1-3)"></textarea>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label">Имя новой переменной</label>
+                    <input class="form-control" type="text" name="logic_new_name" placeholder="Например: SEGMENT_1">
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-end mb-3">
+          <button type="submit" class="btn btn-primary">Применить и создать переменные</button>
+        </div>
+      </form>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      const form = document.getElementById('varsForm');
+      const overlay = document.getElementById('varOverlay');
+      if (form && overlay) {
+        form.addEventListener('submit', () => {
+          overlay.style.display = 'block';
+        });
+      }
+
+      function selectAll(containerId, nameAttr) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
+        inputs.forEach((el) => (el.checked = true));
+      }
+
+      function clearAll(containerId, nameAttr) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
+        inputs.forEach((el) => (el.checked = false));
+      }
+    </script>
+  </body>
+</html>
+

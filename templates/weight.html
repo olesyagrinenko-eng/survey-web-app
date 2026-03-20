@@ -10,7 +10,10 @@
     <div class="container py-4">
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Взвешивание данных</h3>
-        <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">К настройке кросс‑таблицы</a>
+        <div class="btn-group">
+          <a href="{{ url_for('variables_page', return_to='/weight') }}" class="btn btn-outline-secondary btn-sm">Создать переменные</a>
+          <a href="{{ url_for('configure') }}" class="btn btn-outline-primary btn-sm">К настройке кросс‑таблицы</a>
+        </div>
       </div>
 
       {% with messages = get_flashed_messages(with_categories=true) %}
