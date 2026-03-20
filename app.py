@@ -36,6 +36,7 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
 DATASTORE: Dict[str, pd.DataFrame] = {}
 EXCELSTORE: Dict[str, str] = {}  # excel_id -> file path
+RESULTSTORE: Dict[str, Dict[str, Any]] = {}  # result_id -> {"table_html": str, "significance": dict}
 
 
 @dataclass
@@ -922,6 +923,7 @@ def configure():
     columns = list(df.columns)
 
     if request.method == "POST":
+        output_action = request.form.get("output_action", "show")  # show|download
         row_vars = request.form.getlist("row_vars")
         col_vars = request.form.getlist("col_vars")
 
@@ -952,6 +954,7 @@ def configure():
         )
 
         excel_id = None
+        result_id = None
         try:
             table_df, significance = build_crosstab(df, config)
         except Exception as exc:
@@ -959,10 +962,6 @@ def configure():
             return redirect(url_for("configure"))
 
         session["last_config"] = config.__dict__
-
-        # сохраняем промежуточно (может быть тяжело, но мы уже ограничили размер)
-        session["last_table_html"] = table_df.to_html(classes="table table-sm table-striped", index=False)
-        session["last_significance"] = {f"{rk}||{ck}": v for (rk, ck), v in significance.items()}
 
         # Генерируем Excel сразу после успешного расчёта,
         # чтобы скачивание не пересчитывало таблицу повторно (частая причина SIGKILL/500).
@@ -981,6 +980,22 @@ def configure():
             session.pop("last_excel_id", None)
             flash(f"Не удалось подготовить Excel для скачивания: {exc}", "error")
 
+        # Если пользователь запросил только выгрузку — не формируем huge HTML в session/cookie.
+        if output_action == "download":
+            return redirect(url_for("results"))
+
+        # Для показа результатов сохраняем большие данные на сервере, а не в session.
+        try:
+            result_id = uuid.uuid4().hex
+            table_html = table_df.to_html(classes="table table-sm table-striped", index=False)
+            RESULTSTORE[result_id] = {
+                "table_html": table_html,
+                "significance": {f"{rk}||{ck}": v for (rk, ck), v in significance.items()},
+            }
+            session["last_result_id"] = result_id
+        except Exception as exc:
+            flash(f"Не удалось подготовить отображение таблицы: {exc}", "error")
+
         return redirect(url_for("results"))
 
     has_weight = "weight" in columns
@@ -998,8 +1013,10 @@ def results():
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
 
-    table_html = session.get("last_table_html")
-    significance_raw = session.get("last_significance", {})
+    result_id = session.get("last_result_id")
+    stored = RESULTSTORE.get(result_id, {}) if result_id else {}
+    table_html = stored.get("table_html")
+    significance_raw = stored.get("significance", {})
     significance: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for k, v in significance_raw.items():
         row_label, col_label = k.split("||", 1)
