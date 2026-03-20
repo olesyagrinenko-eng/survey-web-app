@@ -961,30 +961,32 @@ def configure():
             flash(str(exc), "error")
             return redirect(url_for("configure"))
 
-        session["last_config"] = config.__dict__
+        # В session НЕ храним config, т.к. список выбранных переменных может быть очень большим,
+        # а Flask session хранится в cookie (JSON-сериализация может падать).
 
-        # Генерируем Excel сразу после успешного расчёта,
-        # чтобы скачивание не пересчитывало таблицу повторно (частая причина SIGKILL/500).
-        try:
-            # дополнительный предохранитель от слишком большого файла
-            cells = int(table_df.shape[0] * table_df.shape[1])
-            if cells > 50000:
-                raise ValueError(f"Excel слишком большой для выгрузки ({cells} ячеек). Уменьшите выбор переменных.")
-            excel_id = uuid.uuid4().hex
-            tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
-            table_df.to_excel(tmp_name, index=False)
-            EXCELSTORE[excel_id] = tmp_name
-            session["last_excel_id"] = excel_id
-        except Exception as exc:
-            # Не валим страницу из-за Excel — просто покажем ошибку при скачивании
-            session.pop("last_excel_id", None)
-            flash(f"Не удалось подготовить Excel для скачивания: {exc}", "error")
-
-        # Если пользователь запросил только выгрузку — не формируем huge HTML в session/cookie.
+        # Excel: генерируем только если пользователь это запросил.
         if output_action == "download":
-            return redirect(url_for("results"))
+            try:
+                cells = int(table_df.shape[0] * table_df.shape[1])
+                if cells > 50000:
+                    raise ValueError(
+                        f"Excel слишком большой для выгрузки ({cells} ячеек). "
+                        f"Уменьшите выбор переменных."
+                    )
+                excel_id = uuid.uuid4().hex
+                tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
+                table_df.to_excel(tmp_name, index=False)
+                EXCELSTORE[excel_id] = tmp_name
+                session["last_excel_id"] = excel_id
+            except Exception as exc:
+                session.pop("last_excel_id", None)
+                flash(f"Не удалось подготовить Excel для скачивания: {exc}", "error")
+                return redirect(url_for("results"))
 
-        # Для показа результатов сохраняем большие данные на сервере, а не в session.
+            # Прямо скачиваем файл после подготовки
+            return redirect(url_for("download_excel"))
+
+        # show: только отображение (без Excel, чтобы не падать на to_excel)
         try:
             result_id = uuid.uuid4().hex
             table_html = table_df.to_html(classes="table table-sm table-striped", index=False)
@@ -1061,30 +1063,9 @@ def download_excel():
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    # Fallback: если файл не подготовился (например, ошибка при to_excel),
-    # попробуем пересчитать, но обязательно с обработкой ошибок.
-    try:
-        df = DATASTORE[key]
-        cfg_dict = session.get("last_config")
-        if not cfg_dict:
-            flash("Сначала рассчитайте таблицу.", "error")
-            return redirect(url_for("configure"))
-
-        config = SurveyConfig(**cfg_dict)
-        table_df, _sig = build_crosstab(df, config)
-
-        tmp_name = f"/tmp/survey_web_{uuid.uuid4().hex}.xlsx"
-        table_df.to_excel(tmp_name, index=False)
-    except Exception as exc:
-        flash(f"Не удалось подготовить Excel: {exc}", "error")
-        return redirect(url_for("results"))
-
-    return send_file(
-        tmp_name,
-        as_attachment=True,
-        download_name="survey_analysis.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    # Без fallback: пересчёт на лету снова может привести к SIGKILL/500 на Render.
+    flash("Excel пока не подготовлен. Нажмите 'Скачать Excel сразу' на странице расчёта.", "error")
+    return redirect(url_for("results"))
 
 
 @app.route("/weight", methods=["GET", "POST"])
@@ -1240,10 +1221,15 @@ def variables_page():
             flash(f"Ошибка создания переменных: {exc}", "error")
             return redirect(url_for("variables_page", return_to=return_to))
 
+        # Flask session хранится в cookie и сериализуется в JSON.
+        # Приводим к plain string, чтобы избежать "not JSON serializable" ошибок.
+        created = [str(x) for x in (created or [])]
+
         new_key = uuid.uuid4().hex
         DATASTORE[new_key] = df_out
         session["active_data_key"] = new_key
-        session["last_created_vars"] = created
+        # Храним только небольшой список, иначе session cookie может стать слишком большой.
+        session["last_created_vars"] = created[:100]
         session["variables_return_to"] = return_to
 
         flash(
