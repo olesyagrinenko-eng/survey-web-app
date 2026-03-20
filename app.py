@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple
@@ -59,7 +60,17 @@ def _load_dataframe_from_upload(file_storage) -> pd.DataFrame:
                 "Для чтения .sav требуется библиотека pyreadstat "
                 "(она уже добавлена в requirements.txt, установите зависимости)."
             )
-        df, _meta = pyreadstat.read_sav(file_storage)
+        # pyreadstat ожидает путь к файлу, а не объект FileStorage
+        fd, tmp_path = tempfile.mkstemp(suffix=".sav")
+        os.close(fd)
+        try:
+            file_storage.save(tmp_path)
+            df, _meta = pyreadstat.read_sav(tmp_path)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         return df
 
     raise ValueError("Неподдерживаемый формат файла. Разрешены: csv, xls, xlsx, sav.")
@@ -118,6 +129,37 @@ def build_crosstab(
     """
     weight_col = "weight" if config.use_weights and "weight" in df.columns else None
 
+    # Ограничения, чтобы не падать по памяти на Render
+    MAX_ROW_UNIQUE_SKIP = 100
+    MAX_ROW_VALUES = 50
+    MAX_COL_VALUES = 50
+    MAX_TOTAL_CELLS = 50000  # оценка до фактического построения
+
+    # Оценка размера результата (сколько строк * сколько столбцов)
+    est_row_count = 0
+    for row_var in config.row_vars:
+        uniq = df[row_var].dropna().unique()
+        n_uniq = len(uniq)
+        if n_uniq > MAX_ROW_UNIQUE_SKIP:
+            continue
+        est_row_count += min(n_uniq, MAX_ROW_VALUES)
+
+    est_col_values = 0
+    for col_var in config.col_vars:
+        uniq = df[col_var].dropna().unique()
+        est_col_values += min(len(uniq), MAX_COL_VALUES)
+
+    est_total_cols = 1 + est_col_values  # + Total
+    est_cells = est_row_count * est_total_cols
+    if est_row_count <= 0:
+        raise ValueError("Не удалось построить таблицу: слишком много уникальных значений/нет данных.")
+    if est_cells > MAX_TOTAL_CELLS:
+        raise ValueError(
+            f"Слишком большой объём кросс-таблицы (оценка ячеек: {est_cells}). "
+            f"Уменьшите количество выбранных переменных или снимите 'Выбрать все'. "
+            f"(Ограничение: {MAX_TOTAL_CELLS} ячеек)"
+        )
+
     # Подготовка столбцов анализа (Total + все выбранные колоночные переменные)
     analysis_cols: List[Tuple[str | None, Any | None, str]] = []  # (col_var, col_val, label)
 
@@ -126,6 +168,8 @@ def build_crosstab(
 
     for col_var in config.col_vars:
         uniques = _safe_sort(df[col_var].dropna().unique())
+        if len(uniques) > MAX_COL_VALUES:
+            uniques = uniques[:MAX_COL_VALUES]
         for val in uniques:
             label = f"{col_var}: {val}"
             analysis_cols.append((col_var, val, label))
@@ -151,8 +195,10 @@ def build_crosstab(
 
     for row_var in config.row_vars:
         unique_vals = _safe_sort(df[row_var].dropna().unique())
-        # для очень "широких" переменных не ограничиваем жёстко, но это может быть тяжело
-        for rv in unique_vals:
+        if len(unique_vals) > MAX_ROW_UNIQUE_SKIP:
+            continue
+        limited_row_values = unique_vals[:MAX_ROW_VALUES] if len(unique_vals) > MAX_ROW_VALUES else unique_vals
+        for rv in limited_row_values:
             label = f"{row_var}: {rv}"
             row: List[Any] = [label]
 
@@ -651,14 +697,17 @@ def configure():
             perform_ztest=perform_ztest,
         )
 
-        table_df, significance = build_crosstab(df, config)
+        try:
+            table_df, significance = build_crosstab(df, config)
+        except Exception as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("configure"))
+
         session["last_config"] = config.__dict__
 
-        # сохраняем промежуточно
+        # сохраняем промежуточно (может быть тяжело, но мы уже ограничили размер)
         session["last_table_html"] = table_df.to_html(classes="table table-sm table-striped", index=False)
-        session["last_significance"] = {
-            f"{rk}||{ck}": v for (rk, ck), v in significance.items()
-        }
+        session["last_significance"] = {f"{rk}||{ck}": v for (rk, ck), v in significance.items()}
 
         return redirect(url_for("results"))
 
