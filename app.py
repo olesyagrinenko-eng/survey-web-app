@@ -33,10 +33,12 @@ except Exception:  # pragma: no cover - optional at runtime
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
+# Ограничиваем размер upload, чтобы не ловить OOM/502 на очень больших файлах.
+app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 40 MB
 
 
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
-DATASTORE: Dict[str, pd.DataFrame] = {}
+DATASTORE: Dict[str, str] = {}  # data_key -> pickle path
 EXCELSTORE: Dict[str, str] = {}  # excel_id -> file path
 RESULTSTORE: Dict[str, Dict[str, Any]] = {}  # result_id -> {"table_html": str, "significance": dict}
 
@@ -50,6 +52,62 @@ class SurveyConfig:
     use_weights: bool
     perform_ztest: bool
     show_sig_marks: bool = True
+
+
+def _store_dataframe(df: pd.DataFrame) -> str:
+    """Сохраняет dataframe на диск и возвращает data_key."""
+    data_key = uuid.uuid4().hex
+    path = f"/tmp/survey_data_{data_key}.pkl"
+    df.to_pickle(path)
+    DATASTORE[data_key] = path
+    return data_key
+
+
+def _load_dataframe(data_key: str) -> pd.DataFrame:
+    path = DATASTORE.get(data_key)
+    if not path or not os.path.exists(path):
+        raise ValueError("Данные не найдены во временном хранилище")
+    return pd.read_pickle(path)
+
+
+def _drop_dataframe(data_key: str | None) -> None:
+    if not data_key:
+        return
+    path = DATASTORE.pop(data_key, None)
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _clear_outputs(session_obj: Any) -> None:
+    excel_id = session_obj.get("last_excel_id")
+    if excel_id:
+        excel_path = EXCELSTORE.pop(excel_id, None)
+        if excel_path and os.path.exists(excel_path):
+            try:
+                os.remove(excel_path)
+            except OSError:
+                pass
+        session_obj.pop("last_excel_id", None)
+
+    result_id = session_obj.get("last_result_id")
+    if result_id:
+        RESULTSTORE.pop(result_id, None)
+        session_obj.pop("last_result_id", None)
+
+
+def _replace_active_dataframe(session_obj: Any, new_df: pd.DataFrame) -> str:
+    """Заменяет активную базу новой версией и чистит старую + outputs."""
+    old_key = session_obj.get("active_data_key")
+    new_key = _store_dataframe(new_df)
+    session_obj["active_data_key"] = new_key
+    if not session_obj.get("data_key"):
+        session_obj["data_key"] = new_key
+    _drop_dataframe(old_key)
+    _clear_outputs(session_obj)
+    return new_key
 
 
 def _load_dataframe_from_upload(file_storage) -> pd.DataFrame:
@@ -1045,9 +1103,15 @@ def index():
         except Exception as exc:
             flash(str(exc), "error")
             return redirect(url_for("index"))
+        # Новый файл = новый источник данных. Старое очищаем.
+        old_active = session.get("active_data_key")
+        old_base = session.get("data_key")
+        _drop_dataframe(old_active)
+        if old_base and old_base != old_active:
+            _drop_dataframe(old_base)
+        _clear_outputs(session)
 
-        key = uuid.uuid4().hex
-        DATASTORE[key] = df
+        key = _store_dataframe(df)
         session["data_key"] = key
         session["active_data_key"] = key
 
@@ -1063,7 +1127,11 @@ def configure():
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
 
-    df = DATASTORE[key]
+    try:
+        df = _load_dataframe(key)
+    except Exception:
+        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
     columns = list(df.columns)
     closed_columns = _detect_closed_columns(df)
 
@@ -1215,7 +1283,11 @@ def results():
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
-    df = DATASTORE[key]
+    try:
+        df = _load_dataframe(key)
+    except Exception:
+        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
     columns = list(df.columns)
     closed_columns = _detect_closed_columns(df)
 
@@ -1335,7 +1407,11 @@ def weight_page():
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
 
-    df = DATASTORE[key]
+    try:
+        df = _load_dataframe(key)
+    except Exception:
+        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
     columns = list(df.columns)
 
     if request.method == "POST":
@@ -1438,9 +1514,7 @@ def weight_page():
             flash("Неизвестный тип взвешивания.", "error")
             return redirect(url_for("weight_page"))
 
-        new_key = uuid.uuid4().hex
-        DATASTORE[new_key] = df_weighted
-        session["active_data_key"] = new_key
+        _replace_active_dataframe(session, df_weighted)
 
         pretty_type = "кросс‑взвешивание" if weighting_type == "cross" else "последовательное взвешивание"
         flash(f"Взвешивание завершено ({pretty_type}). Теперь можно посчитать кросс‑таблицы.", "success")
@@ -1456,7 +1530,11 @@ def variables_page():
         flash("Данные не найдены. Загрузите файл заново.", "error")
         return redirect(url_for("index"))
 
-    df = DATASTORE[key]
+    try:
+        df = _load_dataframe(key)
+    except Exception:
+        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
     columns = list(df.columns)
     closed_columns = _detect_closed_columns(df)
 
@@ -1486,9 +1564,7 @@ def variables_page():
         # Приводим к plain string, чтобы избежать "not JSON serializable" ошибок.
         created = [str(x) for x in (created or [])]
 
-        new_key = uuid.uuid4().hex
-        DATASTORE[new_key] = df_out
-        session["active_data_key"] = new_key
+        _replace_active_dataframe(session, df_out)
         # Храним только небольшой список, иначе session cookie может стать слишком большой.
         session["last_created_vars"] = created[:100]
         session["variables_return_to"] = return_to
