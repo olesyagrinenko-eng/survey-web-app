@@ -19,6 +19,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Результаты анализа</h3>
         <div class="btn-group">
+          <a href="{{ url_for('configure', prefill=1) }}" class="btn btn-outline-primary btn-sm">Донастроить таблицу</a>
           <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">Изменить настройки</a>
           {% if excel_ready %}
             <a href="{{ url_for('download_excel') }}" class="btn btn-outline-primary btn-sm">Скачать Excel</a>
@@ -60,6 +61,14 @@
             Для каждой ячейки с процентом, если включен z‑тест, рассчитывается сравнение с долей Total.<br>
             <strong>p &lt; 0.05</strong> считается статистически значимым различием.
           </p>
+          <p class="mb-2">
+            Маркировка в таблице: <strong>↑</strong> = значимо выше Total, <strong>↓</strong> = значимо ниже Total.
+          </p>
+
+          <p class="mb-3">
+            Рассчитано ячеек для z‑теста: <strong>{{ sig_total }}</strong>.<br>
+            Значимых (p &lt; 0.05): <strong>{{ sig_significant }}</strong>.
+          </p>
 
           {% if significance %}
             <ul>
@@ -71,6 +80,8 @@
                       выше Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
                     {% elif info.direction == 'down' %}
                       ниже Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
+                    {% else %}
+                      не определено (p={{ '%.3f'|format(info.p) }})
                     {% endif %}
                   </li>
                 {% endif %}

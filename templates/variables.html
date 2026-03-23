@@ -61,15 +61,18 @@
       {% endif %}
 
       <form method="post" id="varsForm">
-        <div class="row">
-          <div class="col-lg-6">
-            <div class="card mb-3 shadow-sm">
-              <div class="card-header">TOP/BOT</div>
-              <div class="card-body">
-                <div class="mb-2">
-                  <div class="form-text">Выберите переменные (например Q2, Q3…)</div>
-                </div>
-                <div style="max-height: 300px; overflow-y:auto;" id="topbotVarsList">
+        <div class="accordion" id="varTypesAccordion">
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#typeTopBot" aria-expanded="true" aria-controls="typeTopBot">
+                1) TOP/BOT переменные
+              </button>
+            </h2>
+            <div id="typeTopBot" class="accordion-collapse collapse show" data-bs-parent="#varTypesAccordion">
+              <div class="accordion-body">
+                <p class="mb-2"><strong>Тип результата:</strong> бинарные переменные `0/1` (например `Q2_TOP2`, `Q3_BOT3`).</p>
+                <div class="mb-2"><div class="form-text">Выберите переменные (например Q2, Q3…)</div></div>
+                <div style="max-height: 250px; overflow-y:auto;" id="topbotVarsList">
                   {% for c in columns %}
                     <div class="form-check">
                       <input class="form-check-input" type="checkbox" name="topbot_vars" value="{{ c }}" id="tb_{{ loop.index }}">
@@ -83,97 +86,105 @@
                 </div>
 
                 <hr>
-
-                <div class="mb-2">
-                  <div class="form-text">Какие показатели создать</div>
-                </div>
-                <div class="form-check">
-                  <input class="form-check-input" type="checkbox" name="top2" id="top2" checked>
-                  <label class="form-check-label" for="top2">TOP-2</label>
-                </div>
-                <div class="form-check">
-                  <input class="form-check-input" type="checkbox" name="top3" id="top3">
-                  <label class="form-check-label" for="top3">TOP-3</label>
-                </div>
-                <div class="form-check">
-                  <input class="form-check-input" type="checkbox" name="bot2" id="bot2" checked>
-                  <label class="form-check-label" for="bot2">BOT-2</label>
-                </div>
-                <div class="form-check">
-                  <input class="form-check-input" type="checkbox" name="bot3" id="bot3">
-                  <label class="form-check-label" for="bot3">BOT-3</label>
+                <div class="mb-2"><div class="form-text">Какие TOP/BOT показатели создать</div></div>
+                <div class="row">
+                  <div class="col-md-6">
+                    <div class="form-check"><input class="form-check-input" type="checkbox" name="top2" id="top2" checked><label class="form-check-label" for="top2">TOP-2</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" name="top3" id="top3"><label class="form-check-label" for="top3">TOP-3</label></div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check"><input class="form-check-input" type="checkbox" name="bot2" id="bot2" checked><label class="form-check-label" for="bot2">BOT-2</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" name="bot3" id="bot3"><label class="form-check-label" for="bot3">BOT-3</label></div>
+                  </div>
                 </div>
 
                 <hr>
-
                 <div class="form-check">
                   <input class="form-check-input" type="checkbox" name="topbot_custom_enabled" id="topbot_custom_enabled">
-                  <label class="form-check-label" for="topbot_custom_enabled">Свои коды (создать TOP_CUSTOM)</label>
+                  <label class="form-check-label" for="topbot_custom_enabled">Дополнительно: свои коды (создать `TOP_CUSTOM`)</label>
                 </div>
                 <div class="mt-2">
                   <textarea class="form-control" name="topbot_custom_codes" rows="2" placeholder="Например: 4,5"></textarea>
-                  <div class="form-text">Коды будут использованы как набор включения для TOP_CUSTOM.</div>
                 </div>
               </div>
             </div>
           </div>
 
-          <div class="col-lg-6">
-            <div class="card mb-3 shadow-sm">
-              <div class="card-header">MEAN / GROUP / LOGIC</div>
-              <div class="card-body">
-                <div class="mb-3">
-                  <div class="form-text">MEAN: создаёт {var}_MEAN (среднее по всей выборке)</div>
-                  <div style="max-height: 140px; overflow-y:auto;" id="meanVarsList">
-                    {% for c in columns %}
-                      <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ c }}" id="m_{{ loop.index }}">
-                        <label class="form-check-label" for="m_{{ loop.index }}">{{ c }}</label>
-                      </div>
-                    {% endfor %}
-                  </div>
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#typeMean" aria-expanded="false" aria-controls="typeMean">
+                2) MEAN переменные
+              </button>
+            </h2>
+            <div id="typeMean" class="accordion-collapse collapse" data-bs-parent="#varTypesAccordion">
+              <div class="accordion-body">
+                <p class="mb-2"><strong>Тип результата:</strong> числовые переменные (константа среднего по выборке), например `Q2_MEAN`.</p>
+                <div style="max-height: 250px; overflow-y:auto;" id="meanVarsList">
+                  {% for c in columns %}
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ c }}" id="m_{{ loop.index }}">
+                      <label class="form-check-label" for="m_{{ loop.index }}">{{ c }}</label>
+                    </div>
+                  {% endfor %}
                 </div>
+                <div class="mt-2 d-flex gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll('meanVarsList','mean_vars')">Выбрать все</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearAll('meanVarsList','mean_vars')">Очистить</button>
+                </div>
+              </div>
+            </div>
+          </div>
 
-                <hr>
-
-                <div class="mb-3">
-                  <div class="form-text">Группировка кодов: создаёт категориальную переменную</div>
-                  <div class="mb-2">
-                    <label class="form-label">Переменная для группировки</label>
-                    <select class="form-select" name="group_var">
-                      <option value="">(не выбрано)</option>
-                      {% for c in columns %}
-                        <option value="{{ c }}">{{ c }}</option>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="mb-2">
-                    <label class="form-label">Имя новой переменной</label>
-                    <input class="form-control" type="text" name="group_new_name" placeholder="Например: Q_GROUPED">
-                  </div>
-                  <div class="mb-2">
-                    <label class="form-label">Маппинг (new:old1,old2)</label>
-                    <textarea class="form-control" name="group_mapping" rows="3" placeholder="Например:
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#typeGroup" aria-expanded="false" aria-controls="typeGroup">
+                3) Группировка кодов
+              </button>
+            </h2>
+            <div id="typeGroup" class="accordion-collapse collapse" data-bs-parent="#varTypesAccordion">
+              <div class="accordion-body">
+                <p class="mb-2"><strong>Тип результата:</strong> категориальная переменная с новыми кодами (проценты по ней считать можно).</p>
+                <div class="mb-2">
+                  <label class="form-label">Переменная для группировки</label>
+                  <select class="form-select" name="group_var">
+                    <option value="">(не выбрано)</option>
+                    {% for c in columns %}
+                      <option value="{{ c }}">{{ c }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Имя новой переменной</label>
+                  <input class="form-control" type="text" name="group_new_name" placeholder="Например: Q_GROUPED">
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Маппинг групп (обязательно)</label>
+                  <textarea class="form-control" name="group_mapping" rows="3" placeholder="Например:
 1:1,2,3
 2:4,5,6"></textarea>
-                  </div>
-                  <div class="form-text">Да, по такой переменной можно считать проценты: она появится как обычная категориальная переменная (0/1 или новые коды).</div>
                 </div>
+              </div>
+            </div>
+          </div>
 
-                <hr>
-
-                <div class="mb-3">
-                  <div class="form-text">Логика (И/ИЛИ/скобки). Пример: Q2=4,5 И Q3&lt;&gt;1-3</div>
-                  <div class="mb-2">
-                    <label class="form-label">Выражение</label>
-                    <textarea class="form-control" name="logic_expression" rows="3" placeholder="Q2=4,5 И (Q3=4 ИЛИ Q3&lt;&gt;1-3)"></textarea>
-                  </div>
-                  <div class="mb-2">
-                    <label class="form-label">Имя новой переменной</label>
-                    <input class="form-control" type="text" name="logic_new_name" placeholder="Например: SEGMENT_1">
-                  </div>
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#typeLogic" aria-expanded="false" aria-controls="typeLogic">
+                4) Логические переменные
+              </button>
+            </h2>
+            <div id="typeLogic" class="accordion-collapse collapse" data-bs-parent="#varTypesAccordion">
+              <div class="accordion-body">
+                <p class="mb-2"><strong>Тип результата:</strong> бинарная переменная `0/1` по логическому правилу.</p>
+                <div class="mb-2">
+                  <label class="form-label">Логическое выражение</label>
+                  <textarea class="form-control" name="logic_expression" rows="3" placeholder="Q2=4,5 И (Q3=4 ИЛИ Q3&lt;&gt;1-3)"></textarea>
+                  <div class="form-text">Поддержка: `=`, `<>`, диапазоны `1-3`, операторы `И/ИЛИ`, скобки.</div>
                 </div>
-
+                <div class="mb-2">
+                  <label class="form-label">Имя новой переменной</label>
+                  <input class="form-control" type="text" name="logic_new_name" placeholder="Например: SEGMENT_1">
+                </div>
               </div>
             </div>
           </div>

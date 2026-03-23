@@ -53,7 +53,7 @@
                   <div id="rowVarsList" style="max-height: 400px; overflow-y: auto;">
                     {% for col in columns %}
                       <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="row_vars" value="{{ col }}" form="cfgForm" id="row_{{ loop.index }}">
+                        <input class="form-check-input" type="checkbox" name="row_vars" value="{{ col }}" form="cfgForm" id="row_{{ loop.index }}" {% if col in preselected_rows %}checked{% endif %}>
                         <label class="form-check-label" for="row_{{ loop.index }}">{{ col }}</label>
                       </div>
                     {% endfor %}
@@ -79,7 +79,7 @@
                   <div id="colVarsList" style="max-height: 400px; overflow-y: auto;">
                     {% for col in columns %}
                       <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="col_vars" value="{{ col }}" form="cfgForm" id="col_{{ loop.index }}">
+                        <input class="form-check-input" type="checkbox" name="col_vars" value="{{ col }}" form="cfgForm" id="col_{{ loop.index }}" {% if col in preselected_cols %}checked{% endif %}>
                         <label class="form-check-label" for="col_{{ loop.index }}">{{ col }}</label>
                       </div>
                     {% endfor %}
@@ -106,13 +106,13 @@
                   </div>
                   <div class="card-body">
                     <div class="form-check">
-                      <input class="form-check-input" type="checkbox" value="1" id="metric_count" name="metric_count" checked>
+                      <input class="form-check-input" type="checkbox" value="1" id="metric_count" name="metric_count" {% if metric_count_default %}checked{% endif %}>
                       <label class="form-check-label" for="metric_count">
                         Количество (N)
                       </label>
                     </div>
                     <div class="form-check">
-                      <input class="form-check-input" type="checkbox" value="1" id="metric_percent" name="metric_percent" checked>
+                      <input class="form-check-input" type="checkbox" value="1" id="metric_percent" name="metric_percent" {% if metric_percent_default %}checked{% endif %}>
                       <label class="form-check-label" for="metric_percent">
                         Процент по столбцу
                       </label>
@@ -128,7 +128,7 @@
                   </div>
                   <div class="card-body">
                     <div class="form-check{% if not has_weight %} text-muted{% endif %}">
-                      <input class="form-check-input" type="checkbox" value="1" id="use_weights" name="use_weights" {% if not has_weight %}disabled{% endif %} {% if has_weight %}checked{% endif %}>
+                      <input class="form-check-input" type="checkbox" value="1" id="use_weights" name="use_weights" {% if not has_weight %}disabled{% endif %} {% if use_weights_default and has_weight %}checked{% endif %}>
                       <label class="form-check-label" for="use_weights">
                         Использовать веса (столбец <code>weight</code>)
                       </label>
@@ -138,13 +138,20 @@
                     </div>
 
                     <div class="form-check mt-2">
-                      <input class="form-check-input" type="checkbox" value="1" id="perform_ztest" name="perform_ztest" checked>
+                      <input class="form-check-input" type="checkbox" value="1" id="perform_ztest" name="perform_ztest" {% if perform_ztest_default %}checked{% endif %}>
                       <label class="form-check-label" for="perform_ztest">
                         Рассчитывать значимость (z‑тест против Total)
                       </label>
                       <div class="form-text">
                         Сравнение долей в каждой группе со значением Total, p &lt; 0.05.
                       </div>
+                    </div>
+
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" value="1" id="show_sig_marks" name="show_sig_marks" {% if show_sig_marks_default %}checked{% endif %}>
+                      <label class="form-check-label" for="show_sig_marks">
+                        Показывать маркеры значимости (↑/↓) в таблице и Excel
+                      </label>
                     </div>
                   </div>
                 </div>
