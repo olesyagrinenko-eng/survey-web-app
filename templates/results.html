@@ -202,8 +202,21 @@
       const quickRetuneForm = document.getElementById('quickRetuneForm');
       const retuneOverlay = document.getElementById('retuneOverlay');
       if (quickRetuneForm && retuneOverlay) {
-        quickRetuneForm.addEventListener('submit', function () {
+        quickRetuneForm.addEventListener('submit', function (e) {
           retuneOverlay.style.display = 'block';
+          const action = e.submitter && e.submitter.value ? e.submitter.value : 'show';
+          // Для сценария "пересчитать и скачать" страница может не перезагружаться,
+          // поэтому скрываем оверлей автоматически.
+          if (action === 'download') {
+            setTimeout(() => {
+              retuneOverlay.style.display = 'none';
+            }, 3500);
+          }
+        });
+
+        // Если пользователь вернулся в окно после скачивания, скрываем оверлей.
+        window.addEventListener('focus', function () {
+          retuneOverlay.style.display = 'none';
         });
       }
     </script>

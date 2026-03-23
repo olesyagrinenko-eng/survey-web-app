@@ -207,8 +207,19 @@
       const cfgForm = document.getElementById('cfgForm');
       const overlay = document.getElementById('calcOverlay');
       if (cfgForm && overlay) {
-        cfgForm.addEventListener('submit', function () {
+        cfgForm.addEventListener('submit', function (e) {
           overlay.style.display = 'block';
+          const action = e.submitter && e.submitter.value ? e.submitter.value : 'show';
+          if (action === 'download') {
+            // При прямом скачивании страница может остаться той же.
+            setTimeout(() => {
+              overlay.style.display = 'none';
+            }, 3500);
+          }
+        });
+
+        window.addEventListener('focus', function () {
+          overlay.style.display = 'none';
         });
       }
     </script>
