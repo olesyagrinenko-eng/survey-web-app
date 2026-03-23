@@ -46,6 +46,7 @@
                 </div>
                 <div id="uploadProgressText" class="form-text mt-1">Загрузка...</div>
               </div>
+              <div id="uploadErrorBox" class="alert alert-danger mt-3" style="display:none;"></div>
             </div>
           </div>
         </div>
@@ -60,10 +61,19 @@
         const wrap = document.getElementById('uploadProgressWrap');
         const bar = document.getElementById('uploadProgressBar');
         const text = document.getElementById('uploadProgressText');
-        if (!form || !fileInput || !wrap || !bar || !text) return;
+        const errBox = document.getElementById('uploadErrorBox');
+        if (!form || !fileInput || !wrap || !bar || !text || !errBox) return;
+
+        function showError(msg) {
+          errBox.textContent = msg;
+          errBox.style.display = 'block';
+          wrap.style.display = 'none';
+        }
 
         form.addEventListener('submit', function (e) {
           e.preventDefault();
+          errBox.style.display = 'none';
+
           const file = fileInput.files && fileInput.files[0];
           if (!file) return;
 
@@ -76,6 +86,7 @@
 
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/', true);
+          xhr.timeout = 180000; // 3 min
           xhr.upload.onprogress = function (ev) {
             if (ev.lengthComputable) {
               const percent = Math.round((ev.loaded / ev.total) * 100);
@@ -97,11 +108,20 @@
                 window.location.href = '/';
               }
             } else {
-              alert('Ошибка загрузки: ' + (xhr.responseText || ''));
+              if (xhr.status === 502 || xhr.status === 503 || xhr.status === 504) {
+                showError('Сервис временно недоступен (ошибка ' + xhr.status + '). Подождите 10-20 секунд и повторите попытку.');
+              } else if (xhr.status === 413) {
+                showError('Файл слишком большой для загрузки. Попробуйте уменьшить файл.');
+              } else {
+                showError('Ошибка загрузки (HTTP ' + xhr.status + '). Попробуйте снова.');
+              }
             }
           };
           xhr.onerror = function () {
-            alert('Ошибка сети при загрузке файла.');
+            showError('Ошибка сети при загрузке файла. Проверьте интернет и попробуйте снова.');
+          };
+          xhr.ontimeout = function () {
+            showError('Превышено время ожидания ответа сервиса. Попробуйте снова.');
           };
           xhr.send(fd);
         });

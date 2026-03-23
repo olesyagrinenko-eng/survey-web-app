@@ -15,6 +15,19 @@
     </style>
   </head>
   <body class="bg-light">
+    <div id="retuneOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.35); z-index:2000;">
+      <div style="height:100%; display:flex; align-items:center; justify-content:center;">
+        <div style="width:520px;">
+          <div class="alert alert-info mb-3" style="margin-bottom:12px;">
+            Пересчитываю таблицу по новым параметрам…
+          </div>
+          <div class="progress" aria-label="Пересчет в процессе">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="container py-4">
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Результаты анализа</h3>
@@ -184,6 +197,14 @@
         if (!container) return;
         const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
         inputs.forEach((el) => (el.checked = state));
+      }
+
+      const quickRetuneForm = document.getElementById('quickRetuneForm');
+      const retuneOverlay = document.getElementById('retuneOverlay');
+      if (quickRetuneForm && retuneOverlay) {
+        quickRetuneForm.addEventListener('submit', function () {
+          retuneOverlay.style.display = 'block';
+        });
       }
     </script>
   </body>
