@@ -9,6 +9,8 @@ from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 from flask import (
     Flask,
     render_template,
@@ -164,37 +166,50 @@ def build_crosstab(
             f"(Ограничение: {MAX_TOTAL_CELLS} ячеек)"
         )
 
-    # Подготовка столбцов анализа (Total + все выбранные колоночные переменные)
-    analysis_cols: List[Tuple[str | None, Any | None, str]] = []  # (col_var, col_val, label)
-
-    # Total сначала
-    analysis_cols.append((None, None, "Total"))
-
-    for col_var in config.col_vars:
+    # Подготовка столбцов анализа.
+    # Если выбрано >1 столбцовых переменных, строим многоуровневые комбинации:
+    # например Гео × Возраст.
+    analysis_defs: List[Dict[str, Any]] = [{"label": "Total", "mask": None}]
+    if len(config.col_vars) == 1:
+        col_var = config.col_vars[0]
         uniques = _safe_sort(df[col_var].dropna().unique())
         if len(uniques) > MAX_COL_VALUES:
             uniques = uniques[:MAX_COL_VALUES]
         for val in uniques:
-            label = f"{col_var}: {val}"
-            analysis_cols.append((col_var, val, label))
+            mask = df[col_var] == val
+            analysis_defs.append({"label": f"{col_var}: {val}", "mask": mask})
+    else:
+        # Многоуровневые столбцы (комбинации)
+        cols_df = df[config.col_vars].dropna()
+        combo_rows = cols_df.drop_duplicates()
+        # Сортируем комбинации по строковому представлению кортежа
+        combo_rows = combo_rows.assign(
+            __sort_key__=combo_rows.apply(lambda r: " | ".join([str(r[c]) for c in config.col_vars]), axis=1)
+        ).sort_values("__sort_key__")
+        if len(combo_rows) > MAX_COL_VALUES:
+            combo_rows = combo_rows.head(MAX_COL_VALUES)
+        for _, combo in combo_rows.iterrows():
+            parts = []
+            mask = pd.Series(True, index=df.index)
+            for c in config.col_vars:
+                val = combo[c]
+                parts.append(f"{c}: {val}")
+                mask = mask & (df[c] == val)
+            analysis_defs.append({"label": " | ".join(parts), "mask": mask})
 
     # заголовки
     headers = ["Переменная"]
-    headers.extend([lbl for _, _, lbl in analysis_cols])
+    headers.extend([d["label"] for d in analysis_defs])
 
     rows: List[List[Any]] = []
     significance: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # первая строка — невзвешенные размеры выборки
     sample_row = ["Выборка (N)"]
-    total_n = len(df)
-    sample_row.append(total_n)
-    for col_var, col_val, _lbl in analysis_cols[1:]:
-        if col_var is None:
-            sample_row.append(total_n)
-        else:
-            n = len(df[df[col_var] == col_val])
-            sample_row.append(n)
+    for d in analysis_defs:
+        mask = d["mask"]
+        n = len(df) if mask is None else int(mask.sum())
+        sample_row.append(n)
     rows.append(sample_row)
 
     for row_var in config.row_vars:
@@ -211,28 +226,21 @@ def build_crosstab(
             total_base = 0.0
             group_success_list: List[Tuple[int, float, float]] = []  # index, success, n
 
-            for idx, (col_var, col_val, _lbl) in enumerate(analysis_cols):
-                if col_var is None:
+            for idx, d in enumerate(analysis_defs):
+                col_mask = d["mask"]
+                if col_mask is None:
                     base_mask = df[row_var].notna()
-                    if weight_col:
-                        base_n = df.loc[base_mask, weight_col].sum()
-                        success_n = df.loc[
-                            (df[row_var] == rv) & base_mask, weight_col
-                        ].sum()
-                    else:
-                        base_n = base_mask.sum()
-                        success_n = (df[row_var] == rv).sum()
+                    success_mask = (df[row_var] == rv) & base_mask
                 else:
-                    col_mask = df[col_var] == col_val
                     base_mask = col_mask & df[row_var].notna()
-                    if weight_col:
-                        base_n = df.loc[base_mask, weight_col].sum()
-                        success_n = df.loc[
-                            (df[row_var] == rv) & col_mask, weight_col
-                        ].sum()
-                    else:
-                        base_n = base_mask.sum()
-                        success_n = ((df[row_var] == rv) & col_mask).sum()
+                    success_mask = (df[row_var] == rv) & col_mask
+
+                if weight_col:
+                    base_n = df.loc[base_mask, weight_col].sum()
+                    success_n = df.loc[success_mask, weight_col].sum()
+                else:
+                    base_n = base_mask.sum()
+                    success_n = success_mask.sum()
 
                 # count
                 if config.metric_count:
@@ -274,7 +282,7 @@ def build_crosstab(
                     direction = "none"
                     if p < 0.05:
                         direction = "up" if z > 0 else "down"
-                    col_label = analysis_cols[idx][2]
+                    col_label = analysis_defs[idx]["label"]
                     significance[(label, col_label)] = {
                         "z": z,
                         "p": p,
@@ -321,6 +329,79 @@ def _annotate_table_with_significance(
         out.at[r_idx, col_label] = f"{current} {arrow}"
 
     return out
+
+
+def _apply_significance_fill_to_excel(
+    excel_path: str,
+    table_df: pd.DataFrame,
+    significance: Dict[Tuple[str, str], Dict[str, Any]],
+) -> None:
+    """
+    Красит ячейки значимых отличий в Excel (без изменения значения ячейки).
+    up   -> зеленая заливка
+    down -> красная заливка
+    """
+    if not significance:
+        return
+    wb = load_workbook(excel_path)
+    ws = wb.active
+
+    header_to_col_idx: Dict[str, int] = {}
+    for idx, col_name in enumerate(table_df.columns.tolist(), start=1):
+        header_to_col_idx[str(col_name)] = idx
+
+    rowlabel_to_row_idx: Dict[str, int] = {}
+    for ridx, row_label in enumerate(table_df["Переменная"].astype(str).tolist(), start=2):
+        rowlabel_to_row_idx[row_label] = ridx
+
+    fill_up = PatternFill(fill_type="solid", fgColor="C6EFCE")
+    fill_down = PatternFill(fill_type="solid", fgColor="FFC7CE")
+
+    for (row_label, col_label), info in significance.items():
+        direction = str(info.get("direction", "none"))
+        if direction not in {"up", "down"}:
+            continue
+        excel_row = rowlabel_to_row_idx.get(str(row_label))
+        excel_col = header_to_col_idx.get(str(col_label))
+        if not excel_row or not excel_col:
+            continue
+        cell = ws.cell(row=excel_row, column=excel_col)
+        cell.fill = fill_up if direction == "up" else fill_down
+
+    wb.save(excel_path)
+
+
+def _is_probably_open_question(series: pd.Series) -> bool:
+    """
+    Эвристика: считаем открытым вопросом текстовую переменную
+    с высокой уникальностью и/или длинными неструктурированными ответами.
+    """
+    s = series.dropna().astype(str)
+    if len(s) < 20:
+        return False
+    unique_ratio = s.nunique() / max(len(s), 1)
+    avg_len = s.str.len().mean() if len(s) else 0
+    # если очень много уникальных и ответы длинные -> open
+    if unique_ratio > 0.7 and avg_len > 12:
+        return True
+    # или просто очень длинные ответы
+    if avg_len > 25:
+        return True
+    return False
+
+
+def _detect_closed_columns(df: pd.DataFrame) -> List[str]:
+    closed: List[str] = []
+    for c in df.columns:
+        series = df[c]
+        # numeric/bool чаще всего закрытые
+        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+            closed.append(c)
+            continue
+        # object: отсекаем "open text"
+        if not _is_probably_open_question(series):
+            closed.append(c)
+    return closed
 
 
 # =========================
@@ -887,6 +968,32 @@ def _apply_derived_variables(df: pd.DataFrame, form: Any) -> Tuple[pd.DataFrame,
         df_out[logic_new_name] = logic_series
         created.append(logic_new_name)
 
+    # AUTO FREQ: TOP2/BOT2/MEAN for scales 1-5 / 1-9
+    auto_freq_enabled = form.get("auto_freq_enabled") is not None
+    if auto_freq_enabled:
+        auto_candidates: List[str] = []
+        for c in df_out.columns:
+            if str(c).endswith(("_TOP2", "_TOP3", "_BOT2", "_BOT3", "_MEAN", "_TOP_CUSTOM")):
+                continue
+            s = pd.to_numeric(df_out[c], errors="coerce").dropna()
+            if len(s) < 10:
+                continue
+            uniq = sorted(s.astype(int).unique().tolist())
+            if len(uniq) < 4:
+                continue
+            # шкалы 1-5 или 1-9 (допускаем пропуски/частичное покрытие, но внутри диапазона)
+            if min(uniq) >= 1 and max(uniq) <= 5:
+                auto_candidates.append(c)
+            elif min(uniq) >= 1 and max(uniq) <= 9:
+                auto_candidates.append(c)
+
+        # ограничим чтобы не раздуть файл
+        auto_candidates = auto_candidates[:50]
+        if auto_candidates:
+            created.extend(_apply_top_bot(df_out, auto_candidates, op="top2", suffix="TOP2"))
+            created.extend(_apply_top_bot(df_out, auto_candidates, op="bot2", suffix="BOT2"))
+            created.extend(_apply_mean(df_out, auto_candidates))
+
     # Убираем служебные колонки, созданные нами ранее в процессе логики (если есть)
     return df_out, created
 
@@ -958,6 +1065,7 @@ def configure():
 
     df = DATASTORE[key]
     columns = list(df.columns)
+    closed_columns = _detect_closed_columns(df)
 
     if request.method == "POST":
         output_action = request.form.get("output_action", "show")  # show|download
@@ -1017,7 +1125,9 @@ def configure():
                     )
                 excel_id = uuid.uuid4().hex
                 tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
-                display_df.to_excel(tmp_name, index=False)
+                # В Excel сохраняем ЧИСТЫЕ значения (без стрелок), значимость только заливкой.
+                table_df.to_excel(tmp_name, index=False)
+                _apply_significance_fill_to_excel(tmp_name, table_df, significance)
                 EXCELSTORE[excel_id] = tmp_name
                 session["last_excel_id"] = excel_id
             except Exception as exc:
@@ -1036,6 +1146,7 @@ def configure():
                 "table_html": table_html,
                 "significance": {f"{rk}||{ck}": v for (rk, ck), v in significance.items()},
                 "table_json": display_df.to_json(orient="split"),
+                "table_raw_json": table_df.to_json(orient="split"),
                 "config": config.__dict__,
             }
             session["last_result_id"] = result_id
@@ -1049,7 +1160,8 @@ def configure():
             if cells <= 50000:
                 excel_id = uuid.uuid4().hex
                 tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
-                display_df.to_excel(tmp_name, index=False)
+                table_df.to_excel(tmp_name, index=False)
+                _apply_significance_fill_to_excel(tmp_name, table_df, significance)
                 EXCELSTORE[excel_id] = tmp_name
                 session["last_excel_id"] = excel_id
         except Exception:
@@ -1085,6 +1197,7 @@ def configure():
     return render_template(
         "configure.html",
         columns=columns,
+        closed_columns=closed_columns,
         has_weight=has_weight,
         preselected_rows=preselected_rows,
         preselected_cols=preselected_cols,
@@ -1102,11 +1215,15 @@ def results():
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
+    df = DATASTORE[key]
+    columns = list(df.columns)
+    closed_columns = _detect_closed_columns(df)
 
     result_id = session.get("last_result_id")
     stored = RESULTSTORE.get(result_id, {}) if result_id else {}
     table_html = stored.get("table_html")
     significance_raw = stored.get("significance", {})
+    cfg = stored.get("config", {}) if isinstance(stored, dict) else {}
     significance: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for k, v in significance_raw.items():
         row_label, col_label = k.split("||", 1)
@@ -1118,6 +1235,18 @@ def results():
     excel_id = session.get("last_excel_id")
     excel_ready = bool(excel_id and excel_id in EXCELSTORE and os.path.exists(EXCELSTORE.get(excel_id, "")))
 
+    # defaults for quick retune panel on results page
+    preselected_rows = [str(v) for v in cfg.get("row_vars", []) if str(v) in columns] if isinstance(cfg, dict) else []
+    preselected_cols = [str(v) for v in cfg.get("col_vars", []) if str(v) in columns] if isinstance(cfg, dict) else []
+    metric_count_default = bool(cfg.get("metric_count", True)) if isinstance(cfg, dict) else True
+    metric_percent_default = bool(cfg.get("metric_percent", True)) if isinstance(cfg, dict) else True
+    has_weight = "weight" in columns
+    use_weights_default = bool(cfg.get("use_weights", has_weight)) if isinstance(cfg, dict) else has_weight
+    if not has_weight:
+        use_weights_default = False
+    perform_ztest_default = bool(cfg.get("perform_ztest", True)) if isinstance(cfg, dict) else True
+    show_sig_marks_default = bool(cfg.get("show_sig_marks", True)) if isinstance(cfg, dict) else True
+
     return render_template(
         "results.html",
         table_html=table_html,
@@ -1125,6 +1254,16 @@ def results():
         excel_ready=excel_ready,
         sig_total=sig_total,
         sig_significant=sig_significant,
+        columns=columns,
+        closed_columns=closed_columns,
+        has_weight=has_weight,
+        preselected_rows=preselected_rows,
+        preselected_cols=preselected_cols,
+        metric_count_default=metric_count_default,
+        metric_percent_default=metric_percent_default,
+        use_weights_default=use_weights_default,
+        perform_ztest_default=perform_ztest_default,
+        show_sig_marks_default=show_sig_marks_default,
     )
 
 
@@ -1160,11 +1299,21 @@ def download_excel():
     result_id = session.get("last_result_id")
     stored = RESULTSTORE.get(result_id, {}) if result_id else {}
     table_json = stored.get("table_json")
-    if table_json:
+    table_raw_json = stored.get("table_raw_json")
+    significance_raw = stored.get("significance", {})
+    significance: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for k, v in significance_raw.items():
+        if "||" in k:
+            row_label, col_label = k.split("||", 1)
+            significance[(row_label, col_label)] = v
+    if table_raw_json or table_json:
         try:
-            table_df = pd.read_json(table_json, orient="split")
+            # Для Excel используем raw-таблицу без стрелок и добавляем только заливку.
+            src_json = table_raw_json if table_raw_json else table_json
+            table_df = pd.read_json(src_json, orient="split")
             tmp_name = f"/tmp/survey_web_excel_{uuid.uuid4().hex}.xlsx"
             table_df.to_excel(tmp_name, index=False)
+            _apply_significance_fill_to_excel(tmp_name, table_df, significance)
             return send_file(
                 tmp_name,
                 as_attachment=True,
@@ -1309,6 +1458,7 @@ def variables_page():
 
     df = DATASTORE[key]
     columns = list(df.columns)
+    closed_columns = _detect_closed_columns(df)
 
     allowed_return = {"/configure", "/weight"}
     return_to = request.args.get("return_to", "/configure")
@@ -1354,6 +1504,7 @@ def variables_page():
     return render_template(
         "variables.html",
         columns=columns,
+        closed_columns=closed_columns,
         return_to=return_to,
         show_result=show_result,
         created=created,

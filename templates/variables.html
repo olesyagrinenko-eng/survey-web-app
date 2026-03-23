@@ -71,6 +71,9 @@
             <div id="typeTopBot" class="accordion-collapse collapse show" data-bs-parent="#varTypesAccordion">
               <div class="accordion-body">
                 <p class="mb-2"><strong>Тип результата:</strong> бинарные переменные `0/1` (например `Q2_TOP2`, `Q3_BOT3`).</p>
+                <div class="alert alert-light border py-2 px-3 small">
+                  Можно включить авто-режим ниже: для всех закрытых шкальных вопросов (1-5/1-9) автоматически создадутся `TOP2`, `BOT2`, `MEAN`.
+                </div>
                 <div class="mb-2"><div class="form-text">Выберите переменные (например Q2, Q3…)</div></div>
                 <div style="max-height: 250px; overflow-y:auto;" id="topbotVarsList">
                   {% for c in columns %}
@@ -191,6 +194,12 @@
         </div>
 
         <div class="text-end mb-3">
+          <div class="form-check d-inline-block me-3">
+            <input class="form-check-input" type="checkbox" value="1" id="auto_freq_enabled" name="auto_freq_enabled">
+            <label class="form-check-label" for="auto_freq_enabled">
+              Авто: TOP2/BOT2/MEAN для закрытых шкал 1-5/1-9
+            </label>
+          </div>
           <button type="submit" class="btn btn-primary">Применить и создать переменные</button>
         </div>
       </form>
