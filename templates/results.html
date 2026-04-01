@@ -15,12 +15,30 @@
     </style>
   </head>
   <body class="bg-light">
+    <div id="retuneOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.35); z-index:2000;">
+      <div style="height:100%; display:flex; align-items:center; justify-content:center;">
+        <div style="width:520px;">
+          <div class="alert alert-info mb-3" style="margin-bottom:12px;">
+            Пересчитываю таблицу по новым параметрам…
+          </div>
+          <div class="progress" aria-label="Пересчет в процессе">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="container py-4">
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Результаты анализа</h3>
         <div class="btn-group">
+          <a href="{{ url_for('configure', prefill=1) }}" class="btn btn-outline-primary btn-sm">Донастроить таблицу</a>
           <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">Изменить настройки</a>
-          <a href="{{ url_for('download_excel') }}" class="btn btn-outline-primary btn-sm">Скачать Excel</a>
+          {% if excel_ready %}
+            <a href="{{ url_for('download_excel') }}" class="btn btn-outline-primary btn-sm">Скачать Excel</a>
+          {% else %}
+            <span class="btn btn-outline-primary btn-sm disabled" aria-disabled="true" title="Excel пока не подготовлен">Скачать Excel</span>
+          {% endif %}
           <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Новый файл</a>
         </div>
       </div>
@@ -35,6 +53,93 @@
           {% endfor %}
         {% endif %}
       {% endwith %}
+
+      <div class="card shadow-sm mb-3">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <h6 class="mb-0">Быстрая Донастройка</h6>
+            <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#quickRetune" aria-expanded="false" aria-controls="quickRetune">
+              Открыть панель
+            </button>
+          </div>
+          <div id="quickRetune" class="collapse mt-3">
+            <form method="post" action="{{ url_for('configure') }}" id="quickRetuneForm">
+              <div class="row">
+                <div class="col-md-6">
+                  <div class="border rounded p-2">
+                    <div class="small fw-semibold mb-2">Строки</div>
+                    <div id="retuneRows" style="max-height: 220px; overflow-y:auto;">
+                      {% for col in columns %}
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" name="row_vars" value="{{ col }}" id="rt_row_{{ loop.index }}" {% if col in preselected_rows %}checked{% endif %}>
+                          <label class="form-check-label" for="rt_row_{{ loop.index }}">{{ col }}</label>
+                        </div>
+                      {% endfor %}
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                      <button type="button" class="btn btn-sm btn-outline-primary" onclick="setAll('retuneRows','row_vars',true)">Все</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="setAll('retuneRows','row_vars',false)">Очистить</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="border rounded p-2">
+                    <div class="small fw-semibold mb-2">Столбцы</div>
+                    <div id="retuneCols" style="max-height: 220px; overflow-y:auto;">
+                      {% for col in columns %}
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" name="col_vars" value="{{ col }}" id="rt_col_{{ loop.index }}" {% if col in preselected_cols %}checked{% endif %}>
+                          <label class="form-check-label" for="rt_col_{{ loop.index }}">{{ col }}</label>
+                        </div>
+                      {% endfor %}
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                      <button type="button" class="btn btn-sm btn-outline-primary" onclick="setAll('retuneCols','col_vars',true)">Все</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="setAll('retuneCols','col_vars',false)">Очистить</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="row mt-3">
+                <div class="col-md-6">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="metric_count" id="rt_metric_count" value="1" {% if metric_count_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_metric_count">Количество (N)</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="metric_percent" id="rt_metric_percent" value="1" {% if metric_percent_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_metric_percent">Процент по столбцу</label>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check{% if not has_weight %} text-muted{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="use_weights" id="rt_use_weights" value="1" {% if use_weights_default and has_weight %}checked{% endif %} {% if not has_weight %}disabled{% endif %}>
+                    <label class="form-check-label" for="rt_use_weights">Использовать веса</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="perform_ztest" id="rt_ztest" value="1" {% if perform_ztest_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_ztest">Считать z‑тест</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="show_sig_marks" id="rt_marks" value="1" {% if show_sig_marks_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_marks">Показывать ↑/↓</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="use_nested_columns" id="rt_nested" value="1" {% if use_nested_columns_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_nested">2-й уровень столбцов</label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="d-flex gap-2 justify-content-end mt-3">
+                <button type="submit" name="output_action" value="show" class="btn btn-primary btn-sm">Пересчитать</button>
+                <button type="submit" name="output_action" value="download" class="btn btn-outline-primary btn-sm">Пересчитать и скачать Excel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
 
       <div class="card shadow-sm">
         <div class="card-body">
@@ -56,11 +161,14 @@
             Для каждой ячейки с процентом, если включен z‑тест, рассчитывается сравнение с долей Total.<br>
             <strong>p &lt; 0.05</strong> считается статистически значимым различием.
           </p>
-          {% if not significance %}
-            <div class="alert alert-warning py-2">
-              Значимости не показаны. Обычно это значит, что z‑тест выключен или не выбрана метрика "Процент по столбцу".
-            </div>
-          {% endif %}
+          <p class="mb-2">
+            Маркировка в таблице: <strong>↑</strong> = значимо выше Total, <strong>↓</strong> = значимо ниже Total.
+          </p>
+
+          <p class="mb-3">
+            Рассчитано ячеек для z‑теста: <strong>{{ sig_total }}</strong>.<br>
+            Значимых (p &lt; 0.05): <strong>{{ sig_significant }}</strong>.
+          </p>
 
           {% if significance %}
             <ul>
@@ -72,6 +180,8 @@
                       выше Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
                     {% elif info.direction == 'down' %}
                       ниже Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
+                    {% else %}
+                      не определено (p={{ '%.3f'|format(info.p) }})
                     {% endif %}
                   </li>
                 {% endif %}
@@ -85,6 +195,22 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      function setAll(containerId, nameAttr, state) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
+        inputs.forEach((el) => (el.checked = state));
+      }
+
+      const quickRetuneForm = document.getElementById('quickRetuneForm');
+      const retuneOverlay = document.getElementById('retuneOverlay');
+      if (quickRetuneForm && retuneOverlay) {
+        quickRetuneForm.addEventListener('submit', function () {
+          retuneOverlay.style.display = 'block';
+        });
+      }
+    </script>
   </body>
   </html>
 
