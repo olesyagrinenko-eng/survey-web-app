@@ -32,6 +32,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Результаты анализа</h3>
         <div class="btn-group">
+          <a href="{{ url_for('variable_labels') }}" class="btn btn-outline-secondary btn-sm">Метки / datamap</a>
           <a href="{{ url_for('configure', prefill=1) }}" class="btn btn-outline-primary btn-sm">Донастроить таблицу</a>
           <a href="{{ url_for('configure') }}" class="btn btn-outline-secondary btn-sm">Изменить настройки</a>
           {% if excel_ready %}
@@ -69,10 +70,17 @@
                   <div class="border rounded p-2">
                     <div class="small fw-semibold mb-2">Строки</div>
                     <div id="retuneRows" style="max-height: 220px; overflow-y:auto;">
-                      {% for col in columns %}
-                        <div class="form-check">
-                          <input class="form-check-input" type="checkbox" name="row_vars" value="{{ col }}" id="rt_row_{{ loop.index }}" {% if col in preselected_rows %}checked{% endif %}>
-                          <label class="form-check-label" for="rt_row_{{ loop.index }}">{{ col }}</label>
+                      <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterRetune('retuneRows', this.value)">
+                      {% for item in column_items %}
+                        <div class="form-check rt-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                          <input class="form-check-input" type="checkbox" name="row_vars" value="{{ item.code }}" id="rt_row_{{ loop.index }}" {% if item.code in preselected_rows %}checked{% endif %}>
+                          <label class="form-check-label small" for="rt_row_{{ loop.index }}" title="{{ item.label or item.code }}">
+                            {% if item.label %}
+                              {{ item.label|truncate(72) }}<br><span class="text-muted font-monospace" style="font-size:0.75rem;">{{ item.code }}</span>
+                            {% else %}
+                              <span class="font-monospace">{{ item.code }}</span>
+                            {% endif %}
+                          </label>
                         </div>
                       {% endfor %}
                     </div>
@@ -86,10 +94,17 @@
                   <div class="border rounded p-2">
                     <div class="small fw-semibold mb-2">Столбцы</div>
                     <div id="retuneCols" style="max-height: 220px; overflow-y:auto;">
-                      {% for col in columns %}
-                        <div class="form-check">
-                          <input class="form-check-input" type="checkbox" name="col_vars" value="{{ col }}" id="rt_col_{{ loop.index }}" {% if col in preselected_cols %}checked{% endif %}>
-                          <label class="form-check-label" for="rt_col_{{ loop.index }}">{{ col }}</label>
+                      <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterRetune('retuneCols', this.value)">
+                      {% for item in column_items %}
+                        <div class="form-check rt-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                          <input class="form-check-input" type="checkbox" name="col_vars" value="{{ item.code }}" id="rt_col_{{ loop.index }}" {% if item.code in preselected_cols %}checked{% endif %}>
+                          <label class="form-check-label small" for="rt_col_{{ loop.index }}" title="{{ item.label or item.code }}">
+                            {% if item.label %}
+                              {{ item.label|truncate(72) }}<br><span class="text-muted font-monospace" style="font-size:0.75rem;">{{ item.code }}</span>
+                            {% else %}
+                              <span class="font-monospace">{{ item.code }}</span>
+                            {% endif %}
+                          </label>
                         </div>
                       {% endfor %}
                     </div>
@@ -133,6 +148,10 @@
                     <input class="form-check-input" type="checkbox" name="use_nested_columns" id="rt_nested" value="1" {% if use_nested_columns_default %}checked{% endif %}>
                     <label class="form-check-label" for="rt_nested">2-й уровень столбцов</label>
                   </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="show_segment_coverage" id="rt_coverage" value="1" {% if show_segment_coverage_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_coverage">Охват ЦГ (ответивших / в сегменте)</label>
+                  </div>
                 </div>
               </div>
 
@@ -148,6 +167,13 @@
       <div class="card shadow-sm">
         <div class="card-body">
           <h5 class="card-title mb-3">Кросс‑таблица</h5>
+
+          {% if last_config.get('show_segment_coverage') %}
+            <p class="small text-muted mb-2">
+              Включён <strong>охват по сегментам</strong>: под строкой «Выборка (N)» идут строки «Охват: … (ответивших / в сегменте)» —
+              так видно, кому задавался вопрос в каждой целевой группе.
+            </p>
+          {% endif %}
 
           {% if table_html %}
             {# Преобразуем HTML в структуру, чтобы подсветить значимости. Для простоты оставляем как есть,
@@ -205,6 +231,16 @@
         if (!container) return;
         const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
         inputs.forEach((el) => (el.checked = state));
+      }
+
+      function filterRetune(containerId, q) {
+        const root = document.getElementById(containerId);
+        if (!root) return;
+        const s = (q || '').toLowerCase().trim();
+        root.querySelectorAll('.rt-row').forEach(function (row) {
+          const hay = row.dataset.q || '';
+          row.style.display = !s || hay.includes(s) ? '' : 'none';
+        });
       }
 
       const quickRetuneForm = document.getElementById('quickRetuneForm');

@@ -26,6 +26,7 @@
           <div class="d-flex justify-content-between align-items-center mb-3">
             <h3 class="mb-0">Настройка анализа</h3>
             <div class="btn-group">
+              <a href="{{ url_for('variable_labels') }}" class="btn btn-outline-secondary btn-sm">Метки / datamap</a>
               <a href="{{ url_for('variables_page', return_to='/configure') }}" class="btn btn-outline-secondary btn-sm">Создать переменные</a>
               <a href="{{ url_for('weight_page') }}" class="btn btn-outline-primary btn-sm">Сначала взвесить</a>
               <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Загрузить другой файл</a>
@@ -51,12 +52,36 @@
                 </div>
                 <div class="card-body">
                   <div id="rowVarsList" style="max-height: 400px; overflow-y: auto;">
-                    {% for col in columns %}
-                      <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="row_vars" value="{{ col }}" form="cfgForm" id="row_{{ loop.index }}" {% if col in preselected_rows %}checked{% endif %}>
-                        <label class="form-check-label" for="row_{{ loop.index }}">{{ col }}</label>
-                      </div>
-                    {% endfor %}
+                    <input type="search" class="form-control form-control-sm mb-2" placeholder="Поиск…" oninput="filterVarTree('rowVarsList', this.value)">
+                    <div class="accordion accordion-flush" id="rowVarsListAcc">
+                      {% for group in column_groups %}
+                        {% set gid = loop.index %}
+                        <div class="accordion-item">
+                          <h2 class="accordion-header">
+                            <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#row_grp{{ gid }}">
+                              {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.items|length }}</span>
+                            </button>
+                          </h2>
+                          <div id="row_grp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#rowVarsListAcc">
+                            <div class="accordion-body py-2">
+                              {% for item in group.items %}
+                                <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                                  <input class="form-check-input" type="checkbox" name="row_vars" value="{{ item.code }}" form="cfgForm" id="row_{{ gid }}_{{ loop.index }}" {% if item.code in preselected_rows %}checked{% endif %}>
+                                  <label class="form-check-label" for="row_{{ gid }}_{{ loop.index }}">
+                                    {% if item.label %}
+                                      <span class="fw-medium">{{ item.label }}</span><br>
+                                      <small class="text-muted font-monospace">{{ item.code }}</small>
+                                    {% else %}
+                                      <span class="font-monospace">{{ item.code }}</span>
+                                    {% endif %}
+                                  </label>
+                                </div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                        </div>
+                      {% endfor %}
+                    </div>
                   </div>
                   <div class="mt-2 d-flex gap-2">
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll('rowVarsList')">
@@ -80,15 +105,39 @@
                 </div>
                 <div class="card-body">
                   <div class="form-text mb-2">
-                    Если выбрать 2+ переменных, будет построен второй уровень столбцов (комбинации, например: Гео × Возраст).
+                    Второй уровень столбцов (комбинации) включается отдельным флажком ниже.
                   </div>
                   <div id="colVarsList" style="max-height: 400px; overflow-y: auto;">
-                    {% for col in columns %}
-                      <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="col_vars" value="{{ col }}" form="cfgForm" id="col_{{ loop.index }}" {% if col in preselected_cols %}checked{% endif %}>
-                        <label class="form-check-label" for="col_{{ loop.index }}">{{ col }}</label>
-                      </div>
-                    {% endfor %}
+                    <input type="search" class="form-control form-control-sm mb-2" placeholder="Поиск…" oninput="filterVarTree('colVarsList', this.value)">
+                    <div class="accordion accordion-flush" id="colVarsListAcc">
+                      {% for group in column_groups %}
+                        {% set gid = loop.index %}
+                        <div class="accordion-item">
+                          <h2 class="accordion-header">
+                            <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#col_grp{{ gid }}">
+                              {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.items|length }}</span>
+                            </button>
+                          </h2>
+                          <div id="col_grp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#colVarsListAcc">
+                            <div class="accordion-body py-2">
+                              {% for item in group.items %}
+                                <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                                  <input class="form-check-input" type="checkbox" name="col_vars" value="{{ item.code }}" form="cfgForm" id="col_{{ gid }}_{{ loop.index }}" {% if item.code in preselected_cols %}checked{% endif %}>
+                                  <label class="form-check-label" for="col_{{ gid }}_{{ loop.index }}">
+                                    {% if item.label %}
+                                      <span class="fw-medium">{{ item.label }}</span><br>
+                                      <small class="text-muted font-monospace">{{ item.code }}</small>
+                                    {% else %}
+                                      <span class="font-monospace">{{ item.code }}</span>
+                                    {% endif %}
+                                  </label>
+                                </div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                        </div>
+                      {% endfor %}
+                    </div>
                   </div>
                   <div class="mt-2 d-flex gap-2">
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll('colVarsList')">
@@ -181,6 +230,18 @@
                         По умолчанию выбранные столбцы строятся отдельно. Включай только если нужен кросс типа Гео × Возраст.
                       </div>
                     </div>
+
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" value="1" id="show_segment_coverage" name="show_segment_coverage" {% if show_segment_coverage_default %}checked{% endif %}>
+                      <label class="form-check-label" for="show_segment_coverage">
+                        Охват по целевым группам (ответивших / в сегменте)
+                      </label>
+                      <div class="form-text">
+                        Для каждого вопроса в строках добавляет строку с числом ответивших и размером сегмента по каждому столбцу.
+                        Если цифры не совпадают, вопрос задавался не всей базе в этой ЦГ (например, только пользователям сервиса).
+                        Считается число кейсов (как в строке «Выборка (N)»), без весов. Попадает в таблицу на экране и в Excel.
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -221,6 +282,22 @@
         const closed = new Set({{ closed_columns|tojson }});
         const inputs = container.querySelectorAll('input[type="checkbox"][name="row_vars"], input[type="checkbox"][name="col_vars"]');
         inputs.forEach((el) => (el.checked = closed.has(el.value)));
+      }
+
+      function filterVarTree(rootId, q) {
+        const root = document.getElementById(rootId);
+        if (!root) return;
+        const s = (q || '').toLowerCase().trim();
+        root.querySelectorAll('.tree-row').forEach(function (row) {
+          const hay = row.dataset.q || '';
+          row.style.display = !s || hay.includes(s) ? '' : 'none';
+        });
+        root.querySelectorAll('.accordion-item').forEach(function (item) {
+          const any = Array.from(item.querySelectorAll('.tree-row')).some(function (r) {
+            return r.style.display !== 'none';
+          });
+          item.style.display = !s || any ? '' : 'none';
+        });
       }
 
       const cfgForm = document.getElementById('cfgForm');

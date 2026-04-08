@@ -11,6 +11,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Взвешивание данных</h3>
         <div class="btn-group">
+          <a href="{{ url_for('variable_labels') }}" class="btn btn-outline-secondary btn-sm">Метки / datamap</a>
           <a href="{{ url_for('variables_page', return_to='/weight') }}" class="btn btn-outline-secondary btn-sm">Создать переменные</a>
           <a href="{{ url_for('configure') }}" class="btn btn-outline-primary btn-sm">К настройке кросс‑таблицы</a>
         </div>
@@ -34,11 +35,19 @@
               Переменные для взвешивания
             </div>
             <div class="card-body">
+              <input type="search" class="form-control form-control-sm mb-2" placeholder="Поиск…" oninput="filterWeightVars(this.value)">
               <div style="max-height: 420px; overflow-y: auto;" id="weightVarsList">
-                {% for col in columns %}
-                  <div class="form-check">
-                    <input class="form-check-input" type="checkbox" name="weight_vars" value="{{ col }}" form="wForm" id="w_{{ loop.index }}">
-                    <label class="form-check-label" for="w_{{ loop.index }}">{{ col }}</label>
+                {% for item in column_items %}
+                  <div class="form-check wv-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                    <input class="form-check-input" type="checkbox" name="weight_vars" value="{{ item.code }}" form="wForm" id="w_{{ loop.index }}">
+                    <label class="form-check-label" for="w_{{ loop.index }}">
+                      {% if item.label %}
+                        <span class="fw-medium">{{ item.label }}</span><br>
+                        <small class="text-muted font-monospace">{{ item.code }}</small>
+                      {% else %}
+                        <span class="font-monospace">{{ item.code }}</span>
+                      {% endif %}
+                    </label>
                   </div>
                 {% endfor %}
               </div>
@@ -143,6 +152,16 @@
         if (!container) return;
         const inputs = container.querySelectorAll('input[type="checkbox"][name="weight_vars"]');
         inputs.forEach((el) => (el.checked = false));
+      }
+
+      function filterWeightVars(q) {
+        const root = document.getElementById('weightVarsList');
+        if (!root) return;
+        const s = (q || '').toLowerCase().trim();
+        root.querySelectorAll('.wv-row').forEach(function (row) {
+          const hay = row.dataset.q || '';
+          row.style.display = !s || hay.includes(s) ? '' : 'none';
+        });
       }
 
       function toggleWeightingType() {

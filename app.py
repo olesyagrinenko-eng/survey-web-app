@@ -40,6 +40,7 @@ app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 40 MB
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
 DATASTORE: Dict[str, str] = {}  # data_key -> pickle path
 OPTIONSTORE: Dict[str, Dict[str, List[Any]]] = {}  # data_key -> {var: [all possible values]}
+COLUMN_LABELSTORE: Dict[str, Dict[str, str]] = {}  # data_key -> {column_name: human label / question text}
 EXCELSTORE: Dict[str, str] = {}  # excel_id -> file path
 RESULTSTORE: Dict[str, Dict[str, Any]] = {}  # result_id -> {"table_html": str, "significance": dict}
 
@@ -55,15 +56,27 @@ class SurveyConfig:
     perform_ztest: bool
     show_sig_marks: bool = True
     use_nested_columns: bool = False
+    # Строки «ответивших / в сегменте» по каждому вопросу в строках (для ЦГ с неполным охватом)
+    show_segment_coverage: bool = False
 
 
-def _store_dataframe(df: pd.DataFrame, all_values_map: Dict[str, List[Any]] | None = None) -> str:
+def _filter_labels_for_df(labels: Dict[str, str], df: pd.DataFrame) -> Dict[str, str]:
+    cols = {str(c) for c in df.columns}
+    return {str(k): str(v).strip() for k, v in labels.items() if str(k) in cols and str(v).strip()}
+
+
+def _store_dataframe(
+    df: pd.DataFrame,
+    all_values_map: Dict[str, List[Any]] | None = None,
+    column_labels: Dict[str, str] | None = None,
+) -> str:
     """Сохраняет dataframe на диск и возвращает data_key."""
     data_key = uuid.uuid4().hex
     path = f"/tmp/survey_data_{data_key}.pkl"
     df.to_pickle(path)
     DATASTORE[data_key] = path
     OPTIONSTORE[data_key] = all_values_map or {}
+    COLUMN_LABELSTORE[data_key] = _filter_labels_for_df(column_labels or {}, df)
     return data_key
 
 
@@ -79,6 +92,7 @@ def _drop_dataframe(data_key: str | None) -> None:
         return
     path = DATASTORE.pop(data_key, None)
     OPTIONSTORE.pop(data_key, None)
+    COLUMN_LABELSTORE.pop(data_key, None)
     if path and os.path.exists(path):
         try:
             os.remove(path)
@@ -107,7 +121,8 @@ def _replace_active_dataframe(session_obj: Any, new_df: pd.DataFrame) -> str:
     """Заменяет активную базу новой версией и чистит старую + outputs."""
     old_key = session_obj.get("active_data_key")
     inherited_options = OPTIONSTORE.get(old_key, {}).copy() if old_key else {}
-    new_key = _store_dataframe(new_df, inherited_options)
+    inherited_labels = COLUMN_LABELSTORE.get(old_key, {}).copy() if old_key else {}
+    new_key = _store_dataframe(new_df, inherited_options, inherited_labels)
     session_obj["active_data_key"] = new_key
     if not session_obj.get("data_key"):
         session_obj["data_key"] = new_key
@@ -140,6 +155,33 @@ def _extract_all_values_from_sav_meta(meta: Any) -> Dict[str, List[Any]]:
             labels_map = value_labels.get(label_set_name)
             if isinstance(labels_map, dict):
                 out[str(var_name)] = _safe_sort(list(labels_map.keys()))
+    return out
+
+
+def _extract_column_labels_from_meta(meta: Any) -> Dict[str, str]:
+    """Текстовые метки переменных из метаданных SPSS (если они есть в .sav)."""
+    if meta is None:
+        return {}
+    out: Dict[str, str] = {}
+    d = getattr(meta, "column_names_to_labels", None)
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                continue
+            s = str(v).strip()
+            if s:
+                out[str(k)] = s
+        if out:
+            return out
+    names = getattr(meta, "column_names", None)
+    labels = getattr(meta, "column_labels", None)
+    if isinstance(names, list) and isinstance(labels, list):
+        for n, lab in zip(names, labels):
+            if lab is None or (isinstance(lab, float) and pd.isna(lab)):
+                continue
+            s = str(lab).strip()
+            if s:
+                out[str(n)] = s
     return out
 
 
@@ -232,14 +274,14 @@ def _read_spss_from_path(path: str) -> Tuple[pd.DataFrame, Any]:
     ) from last_err
 
 
-def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, List[Any]]]:
+def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, List[Any]], Dict[str, str]]:
     filename = file_storage.filename or ""
     ext = _upload_extension(filename)
 
     if ext == "csv":
-        return pd.read_csv(file_storage), {}
+        return pd.read_csv(file_storage), {}, {}
     if ext in {"xls", "xlsx"}:
-        return pd.read_excel(file_storage), {}
+        return pd.read_excel(file_storage), {}, {}
     if ext in {"sav", "zsav", "por"}:
         suffix = f".{ext}" if ext else ".sav"
         fd, tmp_path = tempfile.mkstemp(suffix=suffix)
@@ -256,7 +298,7 @@ def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, L
                 os.remove(tmp_path)
             except OSError:
                 pass
-        return df, _extract_all_values_from_sav_meta(meta)
+        return df, _extract_all_values_from_sav_meta(meta), _extract_column_labels_from_meta(meta)
 
     # Расширение не распознано: пробуем определить SPSS по сигнатуре (загрузка без .sav в имени)
     fd, tmp_path = tempfile.mkstemp(suffix=".bin")
@@ -269,7 +311,7 @@ def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, L
         file_storage.save(tmp_path)
         if _looks_like_spss_system_file(tmp_path):
             df, meta = _read_spss_from_path(tmp_path)
-            return df, _extract_all_values_from_sav_meta(meta)
+            return df, _extract_all_values_from_sav_meta(meta), _extract_column_labels_from_meta(meta)
     finally:
         try:
             os.remove(tmp_path)
@@ -293,6 +335,170 @@ def _safe_sort(values: np.ndarray | List[Any]) -> List[Any]:
         return [orig for _, orig in sorted(numeric_values)]
     except Exception:
         return sorted(values, key=lambda x: str(x))
+
+
+def _parse_datamap_excel(path: str) -> Dict[str, str]:
+    """
+    Datamap в стиле Lighthouse/SSI: лист «Variable Information», строка заголовков с «Переменная» и «Метка».
+    """
+    xl = pd.ExcelFile(path)
+    sheet: str | None = None
+    for sn in xl.sheet_names:
+        sl = (sn or "").lower().replace("ё", "е")
+        if "variable information" in sl or "информация о переменн" in sl:
+            sheet = sn
+            break
+    if sheet is None:
+        sheet = xl.sheet_names[0]
+
+    df: pd.DataFrame | None = None
+    last_err: Exception | None = None
+    for hdr in (1, 0):
+        try:
+            t = pd.read_excel(path, sheet_name=sheet, header=hdr)
+            if t.shape[1] < 1:
+                continue
+            df = t
+            break
+        except Exception as exc:
+            last_err = exc
+            df = None
+    if df is None:
+        raise ValueError(f"Не удалось прочитать лист «{sheet}» в datamap: {last_err}")
+
+    cols_lc = {str(c).strip().lower(): c for c in df.columns}
+    code_key: str | None = None
+    label_key: str | None = None
+    for ck in ("переменная", "variable", "var", "name"):
+        if ck in cols_lc:
+            code_key = cols_lc[ck]
+            break
+    for lk in ("метка", "label", "question", "вопрос"):
+        if lk in cols_lc:
+            label_key = cols_lc[lk]
+            break
+    if label_key is None:
+        for low, orig in cols_lc.items():
+            if (("метк" in low) or low == "label") and "знач" not in low and "value" not in low:
+                label_key = orig
+                break
+    if code_key is None:
+        for low, orig in cols_lc.items():
+            if "перемен" in low or low in ("variable", "name", "var"):
+                code_key = orig
+                break
+    if code_key is None or label_key is None:
+        raise ValueError(
+            "В datamap не найдены колонки кода переменной и метки вопроса "
+            "(ожидаются «Переменная» + «Метка» или аналоги name/label)."
+        )
+
+    out: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        raw_code = row.get(code_key)
+        if raw_code is None or (isinstance(raw_code, float) and pd.isna(raw_code)):
+            continue
+        code = str(raw_code).strip()
+        if not code:
+            continue
+        raw_lab = row.get(label_key)
+        if raw_lab is None or (isinstance(raw_lab, float) and pd.isna(raw_lab)):
+            continue
+        lab = str(raw_lab).strip()
+        if not lab:
+            continue
+        out[code] = lab
+    if not out:
+        raise ValueError("В datamap не найдено ни одной пары «код переменной — метка».")
+    return out
+
+
+def _apply_datamap_merge(
+    data_key: str,
+    df: pd.DataFrame,
+    mapping: Dict[str, str],
+    merge_mode: str,
+    case_insensitive: bool,
+) -> Tuple[int, int]:
+    """(совпало кодов с колонками базы, записано/обновлено меток)."""
+    canon = [str(c) for c in df.columns]
+    canon_set = set(canon)
+    lower_map = {c.lower(): c for c in canon} if case_insensitive else {}
+    cur = COLUMN_LABELSTORE.setdefault(data_key, {})
+    matched = 0
+    updated = 0
+    for raw_k, raw_v in mapping.items():
+        k = str(raw_k).strip()
+        if not k:
+            continue
+        if raw_v is None or (isinstance(raw_v, float) and pd.isna(raw_v)):
+            continue
+        v = str(raw_v).strip()
+        if not v:
+            continue
+        target = k if k in canon_set else None
+        if target is None and case_insensitive:
+            target = lower_map.get(k.lower())
+        if target is None:
+            continue
+        matched += 1
+        if merge_mode == "fill_empty":
+            existing = str(cur.get(target, "")).strip()
+            if existing:
+                continue
+        cur[target] = v
+        updated += 1
+    return matched, updated
+
+
+def _ui_column_items(df: pd.DataFrame, data_key: str) -> List[Dict[str, Any]]:
+    labels = COLUMN_LABELSTORE.get(data_key, {})
+    out: List[Dict[str, Any]] = []
+    for col in df.columns:
+        code = str(col)
+        lab = str(labels.get(code, "")).strip()
+        out.append({"code": code, "label": lab, "has_label": bool(lab)})
+    return sorted(
+        out,
+        key=lambda x: (
+            0 if x["has_label"] else 1,
+            (x["label"] or x["code"]).lower(),
+            x["code"].lower(),
+        ),
+    )
+
+
+def _ui_column_groups(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from collections import defaultdict
+
+    buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for it in items:
+        code = it["code"]
+        if "_" in code:
+            root = code.split("_", 1)[0]
+        else:
+            m = re.match(r"^([A-Za-zА-Яа-яЁё]+)", code)
+            root = m.group(1) if m else code[:1]
+        buckets[root].append(it)
+    groups: List[Dict[str, Any]] = []
+    for root in sorted(buckets.keys(), key=lambda x: (x.lower(), x)):
+        groups.append(
+            {
+                "name": root,
+                "items": sorted(buckets[root], key=lambda x: (x["code"].lower(), x["code"])),
+            }
+        )
+    return groups
+
+
+def _template_column_bundle(df: pd.DataFrame, data_key: str) -> Dict[str, Any]:
+    items = _ui_column_items(df, data_key)
+    return {
+        "columns": list(df.columns),
+        "column_items": items,
+        "column_groups": _ui_column_groups(items),
+        "n_column_labels": sum(1 for x in items if x["has_label"]),
+    }
 
 
 def _z_test_vs_total(
@@ -357,7 +563,8 @@ def build_crosstab(
         est_col_values += min(len(uniq), MAX_COL_VALUES)
 
     est_total_cols = 1 + est_col_values  # + Total
-    est_cells = est_row_count * est_total_cols
+    cov_extra = len(config.row_vars) if config.show_segment_coverage else 0
+    est_cells = (est_row_count + 1 + cov_extra) * est_total_cols
     if est_row_count <= 0:
         raise ValueError("Не удалось построить таблицу: слишком много уникальных значений/нет данных.")
     if est_cells > MAX_TOTAL_CELLS:
@@ -412,6 +619,22 @@ def build_crosstab(
         n = len(df) if mask is None else int(mask.sum())
         sample_row.append(n)
     rows.append(sample_row)
+
+    if config.show_segment_coverage:
+        for row_var in config.row_vars:
+            if row_var not in df.columns:
+                continue
+            answered = df[row_var].notna()
+            cov_label = f"Охват: {row_var} (ответивших / в сегменте)"
+            cov_row: List[Any] = [cov_label]
+            for d in analysis_defs:
+                col_mask = d["mask"]
+                seg = pd.Series(True, index=df.index) if col_mask is None else col_mask
+                # Как строка «Выборка (N)»: число кейсов, без весов (сопоставимо с долей «не все ответили»).
+                n_seg = int(seg.sum())
+                n_answ = int((seg & answered).sum())
+                cov_row.append(f"{n_answ} / {n_seg}")
+            rows.append(cov_row)
 
     for row_var in config.row_vars:
         unique_vals = _get_series_all_values(df, row_var, all_values_map)
@@ -1238,7 +1461,7 @@ def index():
             return redirect(url_for("index"))
 
         try:
-            df, all_values_map = _load_dataframe_from_upload(file)
+            df, all_values_map, col_labels = _load_dataframe_from_upload(file)
         except Exception as exc:
             flash(str(exc), "error")
             return redirect(url_for("index"))
@@ -1250,13 +1473,84 @@ def index():
             _drop_dataframe(old_base)
         _clear_outputs(session)
 
-        key = _store_dataframe(df, all_values_map)
+        key = _store_dataframe(df, all_values_map, col_labels)
         session["data_key"] = key
         session["active_data_key"] = key
 
-        return redirect(url_for("configure"))
+        return redirect(url_for("variable_labels"))
 
     return render_template("index.html")
+
+
+@app.route("/variable-labels", methods=["GET", "POST"])
+def variable_labels():
+    """
+    Шаг после загрузки базы: дерево переменных (код + метка вопроса), подгрузка datamap Excel.
+    """
+    key = session.get("active_data_key") or session.get("data_key")
+    if not key or key not in DATASTORE:
+        flash("Данные не найдены, загрузите файл заново.", "error")
+        return redirect(url_for("index"))
+    try:
+        df = _load_dataframe(key)
+    except Exception:
+        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+        return redirect(url_for("index"))
+
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        if action == "continue":
+            return redirect(url_for("configure"))
+        if action == "clear_labels":
+            COLUMN_LABELSTORE[key] = {}
+            flash("Метки вопросов сброшены (имена столбцов в данных не менялись).", "info")
+            return redirect(url_for("variable_labels"))
+        if action == "upload_datamap":
+            f = request.files.get("datamap_file")
+            if not f or not f.filename:
+                flash("Выберите файл datamap (Excel).", "error")
+                return redirect(url_for("variable_labels"))
+            ext = _upload_extension(f.filename)
+            if ext not in {"xlsx", "xls"}:
+                flash("Datamap: поддерживаются только Excel (.xlsx, .xls).", "error")
+                return redirect(url_for("variable_labels"))
+            suffix = ".xlsx" if ext == "xlsx" else ".xls"
+            fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+            os.close(fd)
+            mapping: Dict[str, str] = {}
+            try:
+                try:
+                    f.stream.seek(0)
+                except (OSError, AttributeError, ValueError):
+                    pass
+                f.save(tmp_path)
+                mapping = _parse_datamap_excel(tmp_path)
+            except Exception as exc:
+                flash(f"Не удалось разобрать datamap: {exc}", "error")
+                return redirect(url_for("variable_labels"))
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            merge_mode = request.form.get("merge_mode", "overwrite")
+            if merge_mode not in {"overwrite", "fill_empty"}:
+                merge_mode = "overwrite"
+            case_insensitive = bool(request.form.get("case_insensitive"))
+            matched, updated = _apply_datamap_merge(key, df, mapping, merge_mode, case_insensitive)
+            flash(
+                f"Datamap: совпало с колонками базы: {matched}, обновлено меток: {updated}. "
+                f"Режим: {'только там, где метки ещё пустые' if merge_mode == 'fill_empty' else 'перезапись для совпавших кодов'}.",
+                "success",
+            )
+            return redirect(url_for("variable_labels"))
+
+    bundle = _template_column_bundle(df, key)
+    return render_template(
+        "variable_labels.html",
+        n_columns=len(df.columns),
+        **bundle,
+    )
 
 
 @app.route("/configure", methods=["GET", "POST"])
@@ -1272,6 +1566,7 @@ def configure():
         flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
         return redirect(url_for("index"))
     columns = list(df.columns)
+    col_bundle = _template_column_bundle(df, key)
     closed_columns = _detect_closed_columns(df)
 
     if request.method == "POST":
@@ -1286,6 +1581,7 @@ def configure():
         perform_ztest = bool(request.form.get("perform_ztest"))
         show_sig_marks = bool(request.form.get("show_sig_marks"))
         use_nested_columns = bool(request.form.get("use_nested_columns"))
+        show_segment_coverage = bool(request.form.get("show_segment_coverage"))
 
         if not row_vars:
             flash("Выберите хотя бы одну переменную для строк.", "error")
@@ -1309,6 +1605,7 @@ def configure():
             perform_ztest=perform_ztest,
             show_sig_marks=show_sig_marks,
             use_nested_columns=use_nested_columns,
+            show_segment_coverage=show_segment_coverage,
         )
 
         excel_id = None
@@ -1393,6 +1690,7 @@ def configure():
     perform_ztest_default = True
     show_sig_marks_default = True
     use_nested_columns_default = False
+    show_segment_coverage_default = False
 
     if request.args.get("prefill") == "1":
         result_id = session.get("last_result_id")
@@ -1408,10 +1706,10 @@ def configure():
             perform_ztest_default = bool(cfg.get("perform_ztest", True))
             show_sig_marks_default = bool(cfg.get("show_sig_marks", True))
             use_nested_columns_default = bool(cfg.get("use_nested_columns", False))
+            show_segment_coverage_default = bool(cfg.get("show_segment_coverage", False))
 
     return render_template(
         "configure.html",
-        columns=columns,
         closed_columns=closed_columns,
         has_weight=has_weight,
         preselected_rows=preselected_rows,
@@ -1423,6 +1721,8 @@ def configure():
         perform_ztest_default=perform_ztest_default,
         show_sig_marks_default=show_sig_marks_default,
         use_nested_columns_default=use_nested_columns_default,
+        show_segment_coverage_default=show_segment_coverage_default,
+        **col_bundle,
     )
 
 
@@ -1438,6 +1738,7 @@ def results():
         flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
         return redirect(url_for("index"))
     columns = list(df.columns)
+    col_bundle = _template_column_bundle(df, key)
     closed_columns = _detect_closed_columns(df)
 
     result_id = session.get("last_result_id")
@@ -1469,6 +1770,7 @@ def results():
     perform_ztest_default = bool(cfg.get("perform_ztest", True)) if isinstance(cfg, dict) else True
     show_sig_marks_default = bool(cfg.get("show_sig_marks", True)) if isinstance(cfg, dict) else True
     use_nested_columns_default = bool(cfg.get("use_nested_columns", False)) if isinstance(cfg, dict) else False
+    show_segment_coverage_default = bool(cfg.get("show_segment_coverage", False)) if isinstance(cfg, dict) else False
 
     return render_template(
         "results.html",
@@ -1477,7 +1779,7 @@ def results():
         excel_ready=excel_ready,
         sig_total=sig_total,
         sig_significant=sig_significant,
-        columns=columns,
+        last_config=cfg if isinstance(cfg, dict) else {},
         closed_columns=closed_columns,
         has_weight=has_weight,
         preselected_rows=preselected_rows,
@@ -1489,6 +1791,8 @@ def results():
         perform_ztest_default=perform_ztest_default,
         show_sig_marks_default=show_sig_marks_default,
         use_nested_columns_default=use_nested_columns_default,
+        show_segment_coverage_default=show_segment_coverage_default,
+        **col_bundle,
     )
 
 
@@ -1566,6 +1870,7 @@ def weight_page():
         flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
         return redirect(url_for("index"))
     columns = list(df.columns)
+    col_bundle = _template_column_bundle(df, key)
 
     if request.method == "POST":
         weight_vars = request.form.getlist("weight_vars")
@@ -1673,7 +1978,7 @@ def weight_page():
         flash(f"Взвешивание завершено ({pretty_type}). Теперь можно посчитать кросс‑таблицы.", "success")
         return redirect(url_for("configure"))
 
-    return render_template("weight.html", columns=columns)
+    return render_template("weight.html", **col_bundle)
 
 
 @app.route("/variables", methods=["GET", "POST"])
@@ -1689,9 +1994,10 @@ def variables_page():
         flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
         return redirect(url_for("index"))
     columns = list(df.columns)
+    col_bundle = _template_column_bundle(df, key)
     closed_columns = _detect_closed_columns(df)
 
-    allowed_return = {"/configure", "/weight"}
+    allowed_return = {"/configure", "/weight", "/variable-labels"}
     return_to = request.args.get("return_to", "/configure")
     if return_to not in allowed_return:
         return_to = "/configure"
@@ -1732,11 +2038,11 @@ def variables_page():
     created = session.get("last_created_vars", [])
     return render_template(
         "variables.html",
-        columns=columns,
         closed_columns=closed_columns,
         return_to=return_to,
         show_result=show_result,
         created=created,
+        **col_bundle,
     )
 
 

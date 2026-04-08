@@ -27,7 +27,8 @@
             <div class="card-body">
               <p class="mb-3">
                 Загрузите файл с сырыми данными опроса.<br>
-                Поддерживаемые форматы: <strong>CSV, XLS, XLSX, SAV / ZSAV / POR (SPSS)</strong>.
+                Поддерживаемые форматы: <strong>CSV, XLS, XLSX, SAV / ZSAV / POR (SPSS)</strong>.<br>
+                После загрузки откроется шаг <strong>«Переменные и метки»</strong>: при необходимости подгрузите Excel‑datamap (код → формулировка вопроса), затем перейдите к настройке таблицы.
               </p>
 
               <form id="uploadForm" method="post" enctype="multipart/form-data">
@@ -99,10 +100,10 @@
           xhr.onload = function () {
             if (xhr.status >= 200 && xhr.status < 400) {
               const loc = xhr.getResponseHeader('Location') || '';
-              if (loc.includes('/configure')) {
+              if (loc.includes('/variable-labels') || loc.includes('/configure')) {
                 window.location.href = loc;
               } else if (xhr.status === 200) {
-                window.location.href = '/configure';
+                window.location.href = '/variable-labels';
               } else {
                 // чаще всего при ошибке Render/Flask делает redirect на "/"
                 window.location.href = '/';

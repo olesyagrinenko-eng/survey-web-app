@@ -24,6 +24,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h3 class="mb-0">Создание переменных</h3>
         <div class="btn-group">
+          <a href="{{ url_for('variable_labels') }}" class="btn btn-outline-secondary btn-sm">Метки / datamap</a>
           <a href="{{ return_to }}" class="btn btn-outline-secondary btn-sm">Назад</a>
         </div>
       </div>
@@ -75,11 +76,19 @@
                   Можно включить авто-режим ниже: для всех закрытых шкальных вопросов (1-5/1-9) автоматически создадутся `TOP2`, `BOT2`, `MEAN`.
                 </div>
                 <div class="mb-2"><div class="form-text">Выберите переменные (например Q2, Q3…)</div></div>
+                <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterVarBlock('topbotVarsList', this.value)">
                 <div style="max-height: 250px; overflow-y:auto;" id="topbotVarsList">
-                  {% for c in columns %}
-                    <div class="form-check">
-                      <input class="form-check-input" type="checkbox" name="topbot_vars" value="{{ c }}" id="tb_{{ loop.index }}">
-                      <label class="form-check-label" for="tb_{{ loop.index }}">{{ c }}</label>
+                  {% for item in column_items %}
+                    <div class="form-check vb-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                      <input class="form-check-input" type="checkbox" name="topbot_vars" value="{{ item.code }}" id="tb_{{ loop.index }}">
+                      <label class="form-check-label" for="tb_{{ loop.index }}">
+                        {% if item.label %}
+                          <span class="fw-medium">{{ item.label }}</span><br>
+                          <small class="text-muted font-monospace">{{ item.code }}</small>
+                        {% else %}
+                          <span class="font-monospace">{{ item.code }}</span>
+                        {% endif %}
+                      </label>
                     </div>
                   {% endfor %}
                 </div>
@@ -122,11 +131,19 @@
             <div id="typeMean" class="accordion-collapse collapse" data-bs-parent="#varTypesAccordion">
               <div class="accordion-body">
                 <p class="mb-2"><strong>Тип результата:</strong> числовые переменные (константа среднего по выборке), например `Q2_MEAN`.</p>
+                <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterVarBlock('meanVarsList', this.value)">
                 <div style="max-height: 250px; overflow-y:auto;" id="meanVarsList">
-                  {% for c in columns %}
-                    <div class="form-check">
-                      <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ c }}" id="m_{{ loop.index }}">
-                      <label class="form-check-label" for="m_{{ loop.index }}">{{ c }}</label>
+                  {% for item in column_items %}
+                    <div class="form-check vb-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                      <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ item.code }}" id="m_{{ loop.index }}">
+                      <label class="form-check-label" for="m_{{ loop.index }}">
+                        {% if item.label %}
+                          <span class="fw-medium">{{ item.label }}</span><br>
+                          <small class="text-muted font-monospace">{{ item.code }}</small>
+                        {% else %}
+                          <span class="font-monospace">{{ item.code }}</span>
+                        {% endif %}
+                      </label>
                     </div>
                   {% endfor %}
                 </div>
@@ -151,8 +168,8 @@
                   <label class="form-label">Переменная для группировки</label>
                   <select class="form-select" name="group_var">
                     <option value="">(не выбрано)</option>
-                    {% for c in columns %}
-                      <option value="{{ c }}">{{ c }}</option>
+                    {% for item in column_items %}
+                      <option value="{{ item.code }}">{% if item.label %}{{ item.label }} — {{ item.code }}{% else %}{{ item.code }}{% endif %}</option>
                     {% endfor %}
                   </select>
                 </div>
@@ -227,6 +244,16 @@
         if (!container) return;
         const inputs = container.querySelectorAll('input[type="checkbox"][name="' + nameAttr + '"]');
         inputs.forEach((el) => (el.checked = false));
+      }
+
+      function filterVarBlock(containerId, q) {
+        const root = document.getElementById(containerId);
+        if (!root) return;
+        const s = (q || '').toLowerCase().trim();
+        root.querySelectorAll('.vb-row').forEach(function (row) {
+          const hay = row.dataset.q || '';
+          row.style.display = !s || hay.includes(s) ? '' : 'none';
+        });
       }
     </script>
   </body>

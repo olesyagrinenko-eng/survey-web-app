@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Переменные и метки вопросов</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div class="container py-4">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h3 class="mb-0">Переменные базы</h3>
+        <div class="btn-group">
+          <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Новый файл</a>
+        </div>
+      </div>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <div class="card shadow-sm mb-3">
+        <div class="card-body">
+          <p class="mb-2">
+            В данных <strong>{{ n_columns }}</strong> переменных.
+            С текстовой меткой вопроса сейчас: <strong>{{ n_column_labels }}</strong>
+            (из .sav или из datamap).
+          </p>
+          <p class="text-muted small mb-0">
+            Коды столбцов в файле не переименовываются — метки используются только для удобства в интерфейсе.
+            Можно подгрузить Excel datamap в формате Lighthouse (лист «Variable Information»: колонки «Переменная» и «Метка»).
+          </p>
+        </div>
+      </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-header">Подгрузить datamap (Excel)</div>
+            <div class="card-body">
+              <form method="post" enctype="multipart/form-data">
+                <input type="hidden" name="action" value="upload_datamap">
+                <div class="mb-3">
+                  <label class="form-label" for="datamap_file">Файл</label>
+                  <input class="form-control" type="file" id="datamap_file" name="datamap_file" accept=".xlsx,.xls" required>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Как применять</label>
+                  <select class="form-select" name="merge_mode">
+                    <option value="overwrite" selected>Заменить метку для всех совпавших кодов</option>
+                    <option value="fill_empty">Только там, где метка ещё пустая</option>
+                  </select>
+                </div>
+                <div class="form-check mb-3">
+                  <input class="form-check-input" type="checkbox" value="1" id="case_insensitive" name="case_insensitive">
+                  <label class="form-check-label" for="case_insensitive">Сопоставлять коды без учёта регистра</label>
+                </div>
+                <button type="submit" class="btn btn-primary">Загрузить и применить</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-header">Дальше</div>
+            <div class="card-body d-flex flex-column gap-2">
+              <form method="post">
+                <input type="hidden" name="action" value="continue">
+                <button type="submit" class="btn btn-success w-100">Перейти к выбору строк и столбцов</button>
+              </form>
+              <form method="post" onsubmit="return confirm('Сбросить все метки вопросов для этой сессии?');">
+                <input type="hidden" name="action" value="clear_labels">
+                <button type="submit" class="btn btn-outline-danger w-100">Сбросить метки</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>Дерево переменных</span>
+          <input type="search" class="form-control form-control-sm" style="max-width: 280px;" id="treeSearch" placeholder="Поиск по коду или формулировке…">
+        </div>
+        <div class="card-body" style="max-height: 520px; overflow-y: auto;" id="treeScroll">
+          <div class="accordion accordion-flush" id="varTreeAcc">
+            {% for group in column_groups %}
+              {% set gid = loop.index %}
+              <div class="accordion-item var-group">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#vgrp{{ gid }}">
+                    {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.items|length }}</span>
+                  </button>
+                </h2>
+                <div id="vgrp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#varTreeAcc">
+                  <div class="accordion-body py-2">
+                    {% for item in group.items %}
+                      <div class="tree-row border-bottom py-2" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                        {% if item.label %}
+                          <div class="fw-medium">{{ item.label }}</div>
+                          <div class="small text-muted font-monospace">{{ item.code }}</div>
+                        {% else %}
+                          <div class="font-monospace">{{ item.code }}</div>
+                          <div class="small text-warning">метка не задана — подгрузите datamap или проверьте .sav</div>
+                        {% endif %}
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      (function () {
+        const inp = document.getElementById('treeSearch');
+        if (!inp) return;
+        inp.addEventListener('input', function () {
+          const s = (inp.value || '').toLowerCase().trim();
+          document.querySelectorAll('#varTreeAcc .tree-row').forEach(function (row) {
+            const hay = (row.dataset.q || '');
+            row.style.display = !s || hay.includes(s) ? '' : 'none';
+          });
+          document.querySelectorAll('#varTreeAcc .var-group').forEach(function (grp) {
+            const any = Array.from(grp.querySelectorAll('.tree-row')).some(function (r) {
+              return r.style.display !== 'none';
+            });
+            grp.style.display = !s || any ? '' : 'none';
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>
