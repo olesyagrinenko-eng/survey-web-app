@@ -111,6 +111,10 @@
                     <input class="form-check-input" type="checkbox" name="metric_percent" id="rt_metric_percent" value="1" {% if metric_percent_default %}checked{% endif %}>
                     <label class="form-check-label" for="rt_metric_percent">Процент по столбцу</label>
                   </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="percent_base_total_sample" id="rt_pct_total_base" value="1" {% if percent_base_total_sample_default %}checked{% endif %}>
+                    <label class="form-check-label" for="rt_pct_total_base">Процент от всей выборки</label>
+                  </div>
                 </div>
                 <div class="col-md-6">
                   <div class="form-check{% if not has_weight %} text-muted{% endif %}">

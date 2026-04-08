@@ -27,7 +27,7 @@ from flask import after_this_request
 
 try:
     import pyreadstat  # type: ignore
-except Exception:  # pragma: no cover - optional at runtime
+except (ImportError, OSError):  # pragma: no cover - optional at runtime
     pyreadstat = None
 
 
@@ -39,6 +39,7 @@ app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 40 MB
 
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
 DATASTORE: Dict[str, str] = {}  # data_key -> pickle path
+OPTIONSTORE: Dict[str, Dict[str, List[Any]]] = {}  # data_key -> {var: [all possible values]}
 EXCELSTORE: Dict[str, str] = {}  # excel_id -> file path
 RESULTSTORE: Dict[str, Dict[str, Any]] = {}  # result_id -> {"table_html": str, "significance": dict}
 
@@ -49,18 +50,20 @@ class SurveyConfig:
     col_vars: List[str]
     metric_count: bool
     metric_percent: bool
+    percent_base_total_sample: bool
     use_weights: bool
     perform_ztest: bool
     show_sig_marks: bool = True
     use_nested_columns: bool = False
 
 
-def _store_dataframe(df: pd.DataFrame) -> str:
+def _store_dataframe(df: pd.DataFrame, all_values_map: Dict[str, List[Any]] | None = None) -> str:
     """Сохраняет dataframe на диск и возвращает data_key."""
     data_key = uuid.uuid4().hex
     path = f"/tmp/survey_data_{data_key}.pkl"
     df.to_pickle(path)
     DATASTORE[data_key] = path
+    OPTIONSTORE[data_key] = all_values_map or {}
     return data_key
 
 
@@ -75,6 +78,7 @@ def _drop_dataframe(data_key: str | None) -> None:
     if not data_key:
         return
     path = DATASTORE.pop(data_key, None)
+    OPTIONSTORE.pop(data_key, None)
     if path and os.path.exists(path):
         try:
             os.remove(path)
@@ -102,7 +106,8 @@ def _clear_outputs(session_obj: Any) -> None:
 def _replace_active_dataframe(session_obj: Any, new_df: pd.DataFrame) -> str:
     """Заменяет активную базу новой версией и чистит старую + outputs."""
     old_key = session_obj.get("active_data_key")
-    new_key = _store_dataframe(new_df)
+    inherited_options = OPTIONSTORE.get(old_key, {}).copy() if old_key else {}
+    new_key = _store_dataframe(new_df, inherited_options)
     session_obj["active_data_key"] = new_key
     if not session_obj.get("data_key"):
         session_obj["data_key"] = new_key
@@ -111,34 +116,169 @@ def _replace_active_dataframe(session_obj: Any, new_df: pd.DataFrame) -> str:
     return new_key
 
 
-def _load_dataframe_from_upload(file_storage) -> pd.DataFrame:
-    filename = file_storage.filename or ""
-    ext = filename.lower().split(".")[-1]
+def _extract_all_values_from_sav_meta(meta: Any) -> Dict[str, List[Any]]:
+    """
+    Пытается достать полный список кодов ответов из метаданных .sav
+    (включая варианты с нулевыми наблюдениями).
+    """
+    out: Dict[str, List[Any]] = {}
+    if meta is None:
+        return out
 
-    if ext in {"csv"}:
-        return pd.read_csv(file_storage)
+    var_value_labels = getattr(meta, "variable_value_labels", None) or {}
+    if isinstance(var_value_labels, dict):
+        for var_name, labels_map in var_value_labels.items():
+            if isinstance(labels_map, dict):
+                out[str(var_name)] = _safe_sort(list(labels_map.keys()))
+        if out:
+            return out
+
+    var_to_label = getattr(meta, "variable_to_label", None) or {}
+    value_labels = getattr(meta, "value_labels", None) or {}
+    if isinstance(var_to_label, dict) and isinstance(value_labels, dict):
+        for var_name, label_set_name in var_to_label.items():
+            labels_map = value_labels.get(label_set_name)
+            if isinstance(labels_map, dict):
+                out[str(var_name)] = _safe_sort(list(labels_map.keys()))
+    return out
+
+
+def _get_series_all_values(df: pd.DataFrame, var_name: str, all_values_map: Dict[str, List[Any]]) -> List[Any]:
+    mapped_values = all_values_map.get(var_name, [])
+    if mapped_values:
+        return mapped_values
+
+    series = df[var_name]
+    if pd.api.types.is_categorical_dtype(series):
+        return _safe_sort(series.cat.categories.tolist())
+    return _safe_sort(series.dropna().unique())
+
+
+_SPSS_SUFFIXES = (".sav", ".zsav", ".por")
+
+
+def _upload_extension(filename: str) -> str:
+    """
+    Надёжное расширение для multipart-имени файла (в т.ч. name.something.sav).
+    """
+    base = os.path.basename((filename or "").strip())
+    base_lower = base.lower()
+    for suf in _SPSS_SUFFIXES:
+        if base_lower.endswith(suf):
+            return suf[1:]  # без точки
+    _, ext = os.path.splitext(base_lower)
+    return ext[1:] if ext.startswith(".") else ext
+
+
+def _looks_like_spss_system_file(path: str) -> bool:
+    """Эвристика: классический SPSS .sav начинается с сигнатуры $FL2."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        return head == b"$FL2"
+    except OSError:
+        return False
+
+
+def _read_spss_from_path(path: str) -> Tuple[pd.DataFrame, Any]:
+    """
+    Читает SPSS (.sav, .zsav через read_sav) или Portable (.por через read_por).
+    Пробует несколько кодировок — частая причина сбоев на русских метках.
+    """
+    if pyreadstat is None:
+        raise RuntimeError(
+            "Чтение SPSS недоступно: не установлен пакет pyreadstat. "
+            "На сервере выполните установку зависимостей из requirements.txt "
+            "(pip install -r requirements.txt)."
+        )
+
+    ext = os.path.splitext(path)[1].lower()
+    encodings: List[Any] = [None, "utf-8", "latin-1", "cp1251", "cp1252"]
+
+    def _try_read_por(enc: Any) -> Tuple[pd.DataFrame, Any]:
+        read_por = getattr(pyreadstat, "read_por", None)
+        if read_por is None:
+            raise RuntimeError("Формат .por не поддерживается этой версией pyreadstat.")
+        if enc is None:
+            return read_por(path)
+        try:
+            return read_por(path, encoding=enc)
+        except TypeError:
+            return read_por(path)
+
+    def _try_read_sav(enc: Any) -> Tuple[pd.DataFrame, Any]:
+        if enc is None:
+            return pyreadstat.read_sav(path)
+        try:
+            return pyreadstat.read_sav(path, encoding=enc)
+        except TypeError:
+            return pyreadstat.read_sav(path)
+
+    last_err: Exception | None = None
+    for enc in encodings:
+        try:
+            if ext == ".por":
+                df, meta = _try_read_por(enc)
+            else:
+                df, meta = _try_read_sav(enc)
+            return df, meta
+        except Exception as exc:
+            last_err = exc
+            continue
+
+    raise RuntimeError(
+        "Не удалось прочитать SPSS-файл (проверьте, что это не повреждённый .sav и что файл не зашифрован паролем). "
+        f"Последняя ошибка: {last_err}"
+    ) from last_err
+
+
+def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, List[Any]]]:
+    filename = file_storage.filename or ""
+    ext = _upload_extension(filename)
+
+    if ext == "csv":
+        return pd.read_csv(file_storage), {}
     if ext in {"xls", "xlsx"}:
-        return pd.read_excel(file_storage)
-    if ext in {"sav"}:
-        if pyreadstat is None:
-            raise RuntimeError(
-                "Для чтения .sav требуется библиотека pyreadstat "
-                "(она уже добавлена в requirements.txt, установите зависимости)."
-            )
-        # pyreadstat ожидает путь к файлу, а не объект FileStorage
-        fd, tmp_path = tempfile.mkstemp(suffix=".sav")
+        return pd.read_excel(file_storage), {}
+    if ext in {"sav", "zsav", "por"}:
+        suffix = f".{ext}" if ext else ".sav"
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
         os.close(fd)
         try:
+            try:
+                file_storage.stream.seek(0)
+            except (OSError, AttributeError, ValueError):
+                pass
             file_storage.save(tmp_path)
-            df, _meta = pyreadstat.read_sav(tmp_path)
+            df, meta = _read_spss_from_path(tmp_path)
         finally:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        return df
+        return df, _extract_all_values_from_sav_meta(meta)
 
-    raise ValueError("Неподдерживаемый формат файла. Разрешены: csv, xls, xlsx, sav.")
+    # Расширение не распознано: пробуем определить SPSS по сигнатуре (загрузка без .sav в имени)
+    fd, tmp_path = tempfile.mkstemp(suffix=".bin")
+    os.close(fd)
+    try:
+        try:
+            file_storage.stream.seek(0)
+        except (OSError, AttributeError, ValueError):
+            pass
+        file_storage.save(tmp_path)
+        if _looks_like_spss_system_file(tmp_path):
+            df, meta = _read_spss_from_path(tmp_path)
+            return df, _extract_all_values_from_sav_meta(meta)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    raise ValueError(
+        "Неподдерживаемый формат файла. Разрешены: csv, xls, xlsx, sav, zsav (SPSS), por (SPSS Portable)."
+    )
 
 
 def _safe_sort(values: np.ndarray | List[Any]) -> List[Any]:
@@ -185,6 +325,7 @@ def _z_test_vs_total(
 def build_crosstab(
     df: pd.DataFrame,
     config: SurveyConfig,
+    all_values_map: Dict[str, List[Any]] | None = None,
 ) -> Tuple[pd.DataFrame, Dict[Tuple[str, str], Dict[str, Any]]]:
     """
     Строит кросс‑таблицу.
@@ -193,6 +334,7 @@ def build_crosstab(
       - словарь значимостей {(row_label, col_label) -> {"z": .., "p": .., "dir": "up/down"}}
     """
     weight_col = "weight" if config.use_weights and "weight" in df.columns else None
+    all_values_map = all_values_map or {}
 
     # Ограничения, чтобы не падать по памяти на Render
     MAX_ROW_UNIQUE_SKIP = 100
@@ -203,7 +345,7 @@ def build_crosstab(
     # Оценка размера результата (сколько строк * сколько столбцов)
     est_row_count = 0
     for row_var in config.row_vars:
-        uniq = df[row_var].dropna().unique()
+        uniq = _get_series_all_values(df, row_var, all_values_map)
         n_uniq = len(uniq)
         if n_uniq > MAX_ROW_UNIQUE_SKIP:
             continue
@@ -211,7 +353,7 @@ def build_crosstab(
 
     est_col_values = 0
     for col_var in config.col_vars:
-        uniq = df[col_var].dropna().unique()
+        uniq = _get_series_all_values(df, col_var, all_values_map)
         est_col_values += min(len(uniq), MAX_COL_VALUES)
 
     est_total_cols = 1 + est_col_values  # + Total
@@ -232,7 +374,7 @@ def build_crosstab(
     if len(config.col_vars) == 1 or not config.use_nested_columns:
         # Базовое поведение: раскрываем каждую выбранную переменную отдельно
         for col_var in config.col_vars:
-            uniques = _safe_sort(df[col_var].dropna().unique())
+            uniques = _get_series_all_values(df, col_var, all_values_map)
             if len(uniques) > MAX_COL_VALUES:
                 uniques = uniques[:MAX_COL_VALUES]
             for val in uniques:
@@ -272,7 +414,7 @@ def build_crosstab(
     rows.append(sample_row)
 
     for row_var in config.row_vars:
-        unique_vals = _safe_sort(df[row_var].dropna().unique())
+        unique_vals = _get_series_all_values(df, row_var, all_values_map)
         if len(unique_vals) > MAX_ROW_UNIQUE_SKIP:
             continue
         limited_row_values = unique_vals[:MAX_ROW_VALUES] if len(unique_vals) > MAX_ROW_VALUES else unique_vals
@@ -288,10 +430,11 @@ def build_crosstab(
             for idx, d in enumerate(analysis_defs):
                 col_mask = d["mask"]
                 if col_mask is None:
-                    base_mask = df[row_var].notna()
+                    # База процента: от ответивших (default) или от всей выборки.
+                    base_mask = pd.Series(True, index=df.index) if config.percent_base_total_sample else df[row_var].notna()
                     success_mask = (df[row_var] == rv) & base_mask
                 else:
-                    base_mask = col_mask & df[row_var].notna()
+                    base_mask = col_mask if config.percent_base_total_sample else (col_mask & df[row_var].notna())
                     success_mask = (df[row_var] == rv) & col_mask
 
                 if weight_col:
@@ -1095,7 +1238,7 @@ def index():
             return redirect(url_for("index"))
 
         try:
-            df = _load_dataframe_from_upload(file)
+            df, all_values_map = _load_dataframe_from_upload(file)
         except Exception as exc:
             flash(str(exc), "error")
             return redirect(url_for("index"))
@@ -1107,7 +1250,7 @@ def index():
             _drop_dataframe(old_base)
         _clear_outputs(session)
 
-        key = _store_dataframe(df)
+        key = _store_dataframe(df, all_values_map)
         session["data_key"] = key
         session["active_data_key"] = key
 
@@ -1138,6 +1281,7 @@ def configure():
 
         metric_count = bool(request.form.get("metric_count"))
         metric_percent = bool(request.form.get("metric_percent"))
+        percent_base_total_sample = bool(request.form.get("percent_base_total_sample"))
         use_weights = bool(request.form.get("use_weights"))
         perform_ztest = bool(request.form.get("perform_ztest"))
         show_sig_marks = bool(request.form.get("show_sig_marks"))
@@ -1160,6 +1304,7 @@ def configure():
             col_vars=col_vars,
             metric_count=metric_count,
             metric_percent=metric_percent,
+            percent_base_total_sample=percent_base_total_sample,
             use_weights=use_weights,
             perform_ztest=perform_ztest,
             show_sig_marks=show_sig_marks,
@@ -1169,7 +1314,7 @@ def configure():
         excel_id = None
         result_id = None
         try:
-            table_df, significance = build_crosstab(df, config)
+            table_df, significance = build_crosstab(df, config, OPTIONSTORE.get(key, {}))
         except Exception as exc:
             flash(str(exc), "error")
             return redirect(url_for("configure"))
@@ -1243,6 +1388,7 @@ def configure():
     preselected_cols: List[str] = []
     metric_count_default = True
     metric_percent_default = True
+    percent_base_total_sample_default = False
     use_weights_default = has_weight
     perform_ztest_default = True
     show_sig_marks_default = True
@@ -1257,6 +1403,7 @@ def configure():
             preselected_cols = [str(v) for v in cfg.get("col_vars", []) if str(v) in columns]
             metric_count_default = bool(cfg.get("metric_count", True))
             metric_percent_default = bool(cfg.get("metric_percent", True))
+            percent_base_total_sample_default = bool(cfg.get("percent_base_total_sample", False))
             use_weights_default = bool(cfg.get("use_weights", use_weights_default)) and has_weight
             perform_ztest_default = bool(cfg.get("perform_ztest", True))
             show_sig_marks_default = bool(cfg.get("show_sig_marks", True))
@@ -1271,6 +1418,7 @@ def configure():
         preselected_cols=preselected_cols,
         metric_count_default=metric_count_default,
         metric_percent_default=metric_percent_default,
+        percent_base_total_sample_default=percent_base_total_sample_default,
         use_weights_default=use_weights_default,
         perform_ztest_default=perform_ztest_default,
         show_sig_marks_default=show_sig_marks_default,
@@ -1313,6 +1461,7 @@ def results():
     preselected_cols = [str(v) for v in cfg.get("col_vars", []) if str(v) in columns] if isinstance(cfg, dict) else []
     metric_count_default = bool(cfg.get("metric_count", True)) if isinstance(cfg, dict) else True
     metric_percent_default = bool(cfg.get("metric_percent", True)) if isinstance(cfg, dict) else True
+    percent_base_total_sample_default = bool(cfg.get("percent_base_total_sample", False)) if isinstance(cfg, dict) else False
     has_weight = "weight" in columns
     use_weights_default = bool(cfg.get("use_weights", has_weight)) if isinstance(cfg, dict) else has_weight
     if not has_weight:
@@ -1335,6 +1484,7 @@ def results():
         preselected_cols=preselected_cols,
         metric_count_default=metric_count_default,
         metric_percent_default=metric_percent_default,
+        percent_base_total_sample_default=percent_base_total_sample_default,
         use_weights_default=use_weights_default,
         perform_ztest_default=perform_ztest_default,
         show_sig_marks_default=show_sig_marks_default,

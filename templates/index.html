@@ -27,13 +27,13 @@
             <div class="card-body">
               <p class="mb-3">
                 Загрузите файл с сырыми данными опроса.<br>
-                Поддерживаемые форматы: <strong>CSV, XLS, XLSX, SAV (SPSS)</strong>.
+                Поддерживаемые форматы: <strong>CSV, XLS, XLSX, SAV / ZSAV / POR (SPSS)</strong>.
               </p>
 
               <form id="uploadForm" method="post" enctype="multipart/form-data">
                 <div class="mb-3">
                   <label for="data_file" class="form-label">Файл с данными</label>
-                  <input class="form-control" type="file" id="data_file" name="data_file" required>
+                  <input class="form-control" type="file" id="data_file" name="data_file" accept=".csv,.xls,.xlsx,.sav,.zsav,.por" required>
                 </div>
                 <button type="submit" class="btn btn-primary w-100">
                   Загрузить и перейти к настройке
