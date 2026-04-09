@@ -1473,11 +1473,14 @@ def index():
             _drop_dataframe(old_base)
         _clear_outputs(session)
 
-        key = _store_dataframe(df, all_values_map, col_labels)
-        session["data_key"] = key
-        session["active_data_key"] = key
-
-        return redirect(url_for("variable_labels"))
+        try:
+            key = _store_dataframe(df, all_values_map, col_labels)
+            session["data_key"] = key
+            session["active_data_key"] = key
+            return redirect(url_for("variable_labels"))
+        except Exception as exc:
+            flash(f"Не удалось сохранить загруженные данные: {exc}", "error")
+            return redirect(url_for("index"))
 
     return render_template("index.html")
 
@@ -1545,12 +1548,23 @@ def variable_labels():
             )
             return redirect(url_for("variable_labels"))
 
-    bundle = _template_column_bundle(df, key)
-    return render_template(
-        "variable_labels.html",
-        n_columns=len(df.columns),
-        **bundle,
-    )
+    try:
+        bundle = _template_column_bundle(df, key)
+        return render_template(
+            "variable_labels.html",
+            n_columns=len(df.columns),
+            **bundle,
+        )
+    except Exception as exc:
+        # Защитный fallback: если страница дерева не смогла отрендериться
+        # (например, слишком большой список переменных), продолжаем без падения 500.
+        flash(
+            "Не удалось отобразить дерево переменных после загрузки. "
+            "Переходим сразу к настройке таблицы. "
+            f"Детали: {exc}",
+            "warning",
+        )
+        return redirect(url_for("configure"))
 
 
 @app.route("/configure", methods=["GET", "POST"])
