@@ -540,7 +540,8 @@ def _ui_column_groups(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         groups.append(
             {
                 "name": root,
-                "items": sorted(buckets[root], key=lambda x: (x["code"].lower(), x["code"])),
+                # ключ не «items»: в Jinja group.items — это метод dict, а не список колонок
+                "members": sorted(buckets[root], key=lambda x: (x["code"].lower(), x["code"])),
             }
         )
     return groups

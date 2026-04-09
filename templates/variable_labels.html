@@ -96,12 +96,12 @@
               <div class="accordion-item var-group">
                 <h2 class="accordion-header">
                   <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#vgrp{{ gid }}">
-                    {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.items|length }}</span>
+                    {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.members|length }}</span>
                   </button>
                 </h2>
                 <div id="vgrp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#varTreeAcc">
                   <div class="accordion-body py-2">
-                    {% for item in group.items %}
+                    {% for item in group.members %}
                       <div class="tree-row border-bottom py-2" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
                         {% if item.label %}
                           <div class="fw-medium">{{ item.label }}</div>
