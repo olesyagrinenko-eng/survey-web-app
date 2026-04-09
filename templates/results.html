@@ -175,7 +175,7 @@
           {% if last_config.get('show_segment_coverage') %}
             <p class="small text-muted mb-2">
               Включён <strong>охват по сегментам</strong>: под строкой «Выборка (N)» идут строки с тем же кодом и формулировкой вопроса,
-              а в третьей колонке — пояснение «Охват по ЦГ (ответивших / в сегменте)» и числа по каждому столбцу.
+              пустой колонкой «Код ответа» и пояснением «Охват по ЦГ…» в «Формулировка ответа», далее — числа по столбцам.
             </p>
           {% endif %}
 
@@ -211,7 +211,9 @@
                   <li>
                     <span class="font-monospace">{{ row_key[0] }}</span>
                     {% if row_key[1] %} · {{ row_key[1] }}{% endif %}
-                    · <strong>{{ row_key[2] }}</strong> — <em>{{ row_key[3] }}</em>:
+                    · <span class="font-monospace">{{ row_key[2] }}</span>
+                    {% if row_key[3] %} · {{ row_key[3] }}{% endif %}
+                    — <em>{{ row_key[4] }}</em>:
                     {% if info.direction == 'up' %}
                       выше Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
                     {% elif info.direction == 'down' %}
