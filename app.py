@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
+import traceback
 import uuid
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple
@@ -60,6 +62,36 @@ class SurveyConfig:
     show_segment_coverage: bool = False
 
 
+def _column_manifest_path(data_key: str) -> str:
+    """Лёгкий список колонок без чтения всего pickle (страница меток после upload)."""
+    return f"/tmp/survey_cols_{data_key}.json"
+
+
+def _write_column_manifest(data_key: str, df: pd.DataFrame) -> None:
+    payload = {
+        "columns": [str(c) for c in df.columns],
+        "n_rows": int(len(df)),
+    }
+    path = _column_manifest_path(data_key)
+    with open(path, "w", encoding="utf-8") as mf:
+        json.dump(payload, mf, ensure_ascii=False)
+
+
+def _read_column_manifest(data_key: str) -> List[str] | None:
+    path = _column_manifest_path(data_key)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        cols = data.get("columns")
+        if not isinstance(cols, list):
+            return None
+        return [str(c) for c in cols]
+    except Exception:
+        return None
+
+
 def _filter_labels_for_df(labels: Dict[str, str], df: pd.DataFrame) -> Dict[str, str]:
     cols = {str(c) for c in df.columns}
     return {str(k): str(v).strip() for k, v in labels.items() if str(k) in cols and str(v).strip()}
@@ -73,10 +105,23 @@ def _store_dataframe(
     """Сохраняет dataframe на диск и возвращает data_key."""
     data_key = uuid.uuid4().hex
     path = f"/tmp/survey_data_{data_key}.pkl"
-    df.to_pickle(path)
+    df = df.copy()
+    df.columns = [str(c) for c in df.columns]
+    try:
+        df.to_pickle(path)
+    except Exception:
+        # Некоторые типы из SPSS редко ломают pickle — пробуем явный protocol=4
+        import pickle as _pickle
+
+        with open(path, "wb") as pf:
+            _pickle.dump(df, pf, protocol=4)
     DATASTORE[data_key] = path
     OPTIONSTORE[data_key] = all_values_map or {}
     COLUMN_LABELSTORE[data_key] = _filter_labels_for_df(column_labels or {}, df)
+    try:
+        _write_column_manifest(data_key, df)
+    except OSError:
+        pass
     return data_key
 
 
@@ -96,6 +141,12 @@ def _drop_dataframe(data_key: str | None) -> None:
     if path and os.path.exists(path):
         try:
             os.remove(path)
+        except OSError:
+            pass
+    mp = _column_manifest_path(data_key)
+    if os.path.exists(mp):
+        try:
+            os.remove(mp)
         except OSError:
             pass
 
@@ -415,13 +466,13 @@ def _parse_datamap_excel(path: str) -> Dict[str, str]:
 
 def _apply_datamap_merge(
     data_key: str,
-    df: pd.DataFrame,
+    column_names: List[str],
     mapping: Dict[str, str],
     merge_mode: str,
     case_insensitive: bool,
 ) -> Tuple[int, int]:
     """(совпало кодов с колонками базы, записано/обновлено меток)."""
-    canon = [str(c) for c in df.columns]
+    canon = [str(c) for c in column_names]
     canon_set = set(canon)
     lower_map = {c.lower(): c for c in canon} if case_insensitive else {}
     cur = COLUMN_LABELSTORE.setdefault(data_key, {})
@@ -451,10 +502,10 @@ def _apply_datamap_merge(
     return matched, updated
 
 
-def _ui_column_items(df: pd.DataFrame, data_key: str) -> List[Dict[str, Any]]:
+def _ui_column_items_from_columns(columns: List[str], data_key: str) -> List[Dict[str, Any]]:
     labels = COLUMN_LABELSTORE.get(data_key, {})
     out: List[Dict[str, Any]] = []
-    for col in df.columns:
+    for col in columns:
         code = str(col)
         lab = str(labels.get(code, "")).strip()
         out.append({"code": code, "label": lab, "has_label": bool(lab)})
@@ -466,6 +517,10 @@ def _ui_column_items(df: pd.DataFrame, data_key: str) -> List[Dict[str, Any]]:
             x["code"].lower(),
         ),
     )
+
+
+def _ui_column_items(df: pd.DataFrame, data_key: str) -> List[Dict[str, Any]]:
+    return _ui_column_items_from_columns([str(c) for c in df.columns], data_key)
 
 
 def _ui_column_groups(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1455,31 +1510,36 @@ def cross_weight(df: pd.DataFrame, vars_list: List[str], targets: Dict[str, floa
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
-        file = request.files.get("data_file")
-        if not file or not file.filename:
-            flash("Пожалуйста, выберите файл с данными.", "error")
-            return redirect(url_for("index"))
-
         try:
-            df, all_values_map, col_labels = _load_dataframe_from_upload(file)
-        except Exception as exc:
-            flash(str(exc), "error")
-            return redirect(url_for("index"))
-        # Новый файл = новый источник данных. Старое очищаем.
-        old_active = session.get("active_data_key")
-        old_base = session.get("data_key")
-        _drop_dataframe(old_active)
-        if old_base and old_base != old_active:
-            _drop_dataframe(old_base)
-        _clear_outputs(session)
+            file = request.files.get("data_file")
+            if not file or not file.filename:
+                flash("Пожалуйста, выберите файл с данными.", "error")
+                return redirect(url_for("index"))
 
-        try:
-            key = _store_dataframe(df, all_values_map, col_labels)
-            session["data_key"] = key
-            session["active_data_key"] = key
-            return redirect(url_for("variable_labels"))
+            try:
+                df, all_values_map, col_labels = _load_dataframe_from_upload(file)
+            except Exception as exc:
+                flash(str(exc), "error")
+                return redirect(url_for("index"))
+            # Новый файл = новый источник данных. Старое очищаем.
+            old_active = session.get("active_data_key")
+            old_base = session.get("data_key")
+            _drop_dataframe(old_active)
+            if old_base and old_base != old_active:
+                _drop_dataframe(old_base)
+            _clear_outputs(session)
+
+            try:
+                key = _store_dataframe(df, all_values_map, col_labels)
+                session["data_key"] = key
+                session["active_data_key"] = key
+                return redirect(url_for("variable_labels"))
+            except Exception as exc:
+                flash(f"Не удалось сохранить загруженные данные: {exc}", "error")
+                return redirect(url_for("index"))
         except Exception as exc:
-            flash(f"Не удалось сохранить загруженные данные: {exc}", "error")
+            traceback.print_exc()
+            flash(f"Внутренняя ошибка при загрузке файла: {exc}", "error")
             return redirect(url_for("index"))
 
     return render_template("index.html")
@@ -1489,16 +1549,20 @@ def index():
 def variable_labels():
     """
     Шаг после загрузки базы: дерево переменных (код + метка вопроса), подгрузка datamap Excel.
+    Не загружаем весь DataFrame из pickle (большие .sav) — только manifest колонок.
     """
     key = session.get("active_data_key") or session.get("data_key")
     if not key or key not in DATASTORE:
         flash("Данные не найдены, загрузите файл заново.", "error")
         return redirect(url_for("index"))
-    try:
-        df = _load_dataframe(key)
-    except Exception:
-        flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
-        return redirect(url_for("index"))
+    cols = _read_column_manifest(key)
+    if not cols:
+        try:
+            df_fb = _load_dataframe(key)
+            cols = [str(c) for c in df_fb.columns]
+        except Exception:
+            flash("Не удалось загрузить данные из временного хранилища. Загрузите файл заново.", "error")
+            return redirect(url_for("index"))
 
     if request.method == "POST":
         action = request.form.get("action", "")
@@ -1540,7 +1604,7 @@ def variable_labels():
             if merge_mode not in {"overwrite", "fill_empty"}:
                 merge_mode = "overwrite"
             case_insensitive = bool(request.form.get("case_insensitive"))
-            matched, updated = _apply_datamap_merge(key, df, mapping, merge_mode, case_insensitive)
+            matched, updated = _apply_datamap_merge(key, cols, mapping, merge_mode, case_insensitive)
             flash(
                 f"Datamap: совпало с колонками базы: {matched}, обновлено меток: {updated}. "
                 f"Режим: {'только там, где метки ещё пустые' if merge_mode == 'fill_empty' else 'перезапись для совпавших кодов'}.",
@@ -1549,11 +1613,16 @@ def variable_labels():
             return redirect(url_for("variable_labels"))
 
     try:
-        bundle = _template_column_bundle(df, key)
+        items = _ui_column_items_from_columns(cols, key)
+        groups = _ui_column_groups(items)
+        n_labeled = sum(1 for x in items if x["has_label"])
         return render_template(
             "variable_labels.html",
-            n_columns=len(df.columns),
-            **bundle,
+            n_columns=len(cols),
+            column_items=items,
+            column_groups=groups,
+            columns=cols,
+            n_column_labels=n_labeled,
         )
     except Exception as exc:
         # Защитный fallback: если страница дерева не смогла отрендериться
