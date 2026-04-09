@@ -55,7 +55,7 @@
 
             <div class="d-flex gap-2 mt-3 flex-wrap">
               <a href="{{ return_to }}" class="btn btn-primary">Перейти дальше</a>
-              <a href="{{ url_for('variables_page', return_to=return_to) }} " class="btn btn-outline-secondary">Создать ещё</a>
+              <a href="{{ url_for('variables_page', return_to=return_to) }}" class="btn btn-outline-secondary">Создать ещё</a>
             </div>
           </div>
         </div>
@@ -75,11 +75,13 @@
                 <div class="alert alert-light border py-2 px-3 small">
                   Можно включить авто-режим ниже: для всех закрытых шкальных вопросов (1-5/1-9) автоматически создадутся `TOP2`, `BOT2`, `MEAN`.
                 </div>
-                <div class="mb-2"><div class="form-text">Выберите переменные (например Q2, Q3…)</div></div>
+                <div class="mb-2">
+                  <div class="form-text">Выберите переменные. Под каждой — <strong>коды ответов</strong> из базы или метаданных (для TOP/BOT по ним проще сверяться).</div>
+                </div>
                 <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterVarBlock('topbotVarsList', this.value)">
                 <div style="max-height: 250px; overflow-y:auto;" id="topbotVarsList">
                   {% for item in column_items %}
-                    <div class="form-check vb-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                    <div class="form-check vb-row mb-2 pb-1 border-bottom border-light" data-q="{{ (item.label ~ ' ' ~ item.code ~ ' ' ~ (item.value_codes|join(' ')))|lower }}">
                       <input class="form-check-input" type="checkbox" name="topbot_vars" value="{{ item.code }}" id="tb_{{ loop.index }}">
                       <label class="form-check-label" for="tb_{{ loop.index }}">
                         {% if item.label %}
@@ -89,6 +91,11 @@
                           <span class="fw-medium">{{ item.code }}</span>
                         {% else %}
                           <span class="font-monospace">{{ item.code }}</span>
+                        {% endif %}
+                        {% if item.value_codes_note %}
+                          <div class="small text-warning mt-1">{{ item.value_codes_note }}</div>
+                        {% elif item.value_codes %}
+                          <div class="small text-muted font-monospace mt-1" style="line-height:1.25;">коды: {{ item.value_codes|join(', ') }}{% if item.value_codes_truncated %} …{% endif %}</div>
                         {% endif %}
                       </label>
                     </div>
@@ -119,6 +126,7 @@
                 </div>
                 <div class="mt-2">
                   <textarea class="form-control" name="topbot_custom_codes" rows="2" placeholder="Например: 4,5"></textarea>
+                  <div class="form-text">Коды возьмите из строки «коды: …» у выбранных переменных или из справочника внизу.</div>
                 </div>
               </div>
             </div>
@@ -133,10 +141,11 @@
             <div id="typeMean" class="accordion-collapse collapse" data-bs-parent="#varTypesAccordion">
               <div class="accordion-body">
                 <p class="mb-2"><strong>Тип результата:</strong> числовые переменные (константа среднего по выборке), например `Q2_MEAN`.</p>
+                <div class="form-text mb-2">Под каждой переменной показаны коды шкалы (если список не скрыт).</div>
                 <input type="search" class="form-control form-control-sm mb-1" placeholder="Поиск…" oninput="filterVarBlock('meanVarsList', this.value)">
                 <div style="max-height: 250px; overflow-y:auto;" id="meanVarsList">
                   {% for item in column_items %}
-                    <div class="form-check vb-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                    <div class="form-check vb-row mb-2 pb-1 border-bottom border-light" data-q="{{ (item.label ~ ' ' ~ item.code ~ ' ' ~ (item.value_codes|join(' ')))|lower }}">
                       <input class="form-check-input" type="checkbox" name="mean_vars" value="{{ item.code }}" id="m_{{ loop.index }}">
                       <label class="form-check-label" for="m_{{ loop.index }}">
                         {% if item.label %}
@@ -146,6 +155,11 @@
                           <span class="fw-medium">{{ item.code }}</span>
                         {% else %}
                           <span class="font-monospace">{{ item.code }}</span>
+                        {% endif %}
+                        {% if item.value_codes_note %}
+                          <div class="small text-warning mt-1">{{ item.value_codes_note }}</div>
+                        {% elif item.value_codes %}
+                          <div class="small text-muted font-monospace mt-1" style="line-height:1.25;">коды: {{ item.value_codes|join(', ') }}{% if item.value_codes_truncated %} …{% endif %}</div>
                         {% endif %}
                       </label>
                     </div>
@@ -170,12 +184,13 @@
                 <p class="mb-2"><strong>Тип результата:</strong> категориальная переменная с новыми кодами (проценты по ней считать можно).</p>
                 <div class="mb-2">
                   <label class="form-label">Переменная для группировки</label>
-                  <select class="form-select" name="group_var">
+                  <select class="form-select" name="group_var" id="groupVarSelect">
                     <option value="">(не выбрано)</option>
                     {% for item in column_items %}
                       <option value="{{ item.code }}">{% if item.label %}{{ item.label }} — {{ item.code }}{% else %}{{ item.code }}{% endif %}</option>
                     {% endfor %}
                   </select>
+                  <div id="groupVarValueHint" class="alert alert-light border small font-monospace mt-2 mb-0 py-2" style="display:none;" aria-live="polite"></div>
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Имя новой переменной</label>
@@ -186,6 +201,7 @@
                   <textarea class="form-control" name="group_mapping" rows="3" placeholder="Например:
 1:1,2,3
 2:4,5,6"></textarea>
+                  <div class="form-text">Слева — код новой группы, справа через запятую — <strong>исходные коды</strong> из списка ниже (те же, что в базе).</div>
                 </div>
               </div>
             </div>
@@ -203,7 +219,10 @@
                 <div class="mb-2">
                   <label class="form-label">Логическое выражение</label>
                   <textarea class="form-control" name="logic_expression" rows="3" placeholder="Q2=4,5 И (Q3=4 ИЛИ Q3&lt;&gt;1-3)"></textarea>
-                  <div class="form-text">Поддержка: `=`, `<>`, диапазоны `1-3`, операторы `И/ИЛИ`, скобки.</div>
+                  <div class="form-text">
+                    Поддержка: <code>=</code>, <code>&lt;&gt;</code>, диапазоны <code>1-3</code>, операторы <code>И</code>/<code>ИЛИ</code>, скобки.
+                    Коды после <code>=</code> должны совпадать с теми, что в базе — см. <strong>справочник кодов</strong> внизу страницы или под списками переменных выше.
+                  </div>
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Имя новой переменной</label>
@@ -211,6 +230,30 @@
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+
+        <div class="card shadow-sm mb-3">
+          <div class="card-header py-2 d-flex flex-wrap gap-2 justify-content-between align-items-center">
+            <span class="fw-semibold">Справочник кодов по переменным</span>
+            <input type="search" class="form-control form-control-sm" style="max-width:240px" placeholder="Поиск по коду, метке, кодам…" id="refSearch" oninput="filterRef(this.value)">
+          </div>
+          <div class="card-body py-2" style="max-height:320px;overflow-y:auto" id="refList">
+            {% for item in column_items %}
+              <details class="border-bottom py-2 ref-row" data-q="{{ (item.label ~ ' ' ~ item.code ~ ' ' ~ (item.value_codes|join(' ')))|lower }}">
+                <summary class="small">
+                  <span class="font-monospace fw-medium">{{ item.code }}</span>
+                  {% if item.label %}<span class="text-muted"> — {{ item.label|truncate(70) }}</span>{% endif %}
+                </summary>
+                {% if item.value_codes_note %}
+                  <div class="small text-warning mt-2 mb-0">{{ item.value_codes_note }}</div>
+                {% elif item.value_codes %}
+                  <div class="small font-monospace text-muted mt-2 mb-0" style="line-height:1.35;">{{ item.value_codes|join(', ') }}{% if item.value_codes_truncated %} <span class="text-secondary">…</span>{% endif %}</div>
+                {% else %}
+                  <div class="small text-muted mt-2 mb-0">нет значений для отображения</div>
+                {% endif %}
+              </details>
+            {% endfor %}
           </div>
         </div>
 
@@ -228,6 +271,48 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+      window.VAR_VALUES = {{ var_values_lookup|tojson }};
+
+      function renderGroupVarHint() {
+        const sel = document.getElementById('groupVarSelect');
+        const box = document.getElementById('groupVarValueHint');
+        if (!sel || !box) return;
+        const code = sel.value;
+        if (!code || !window.VAR_VALUES || !window.VAR_VALUES[code]) {
+          box.style.display = 'none';
+          box.textContent = '';
+          return;
+        }
+        const e = window.VAR_VALUES[code];
+        if (e.note) {
+          box.className = 'alert alert-warning border small mt-2 mb-0 py-2';
+          box.textContent = e.note;
+          box.style.display = 'block';
+          return;
+        }
+        if (!e.codes || !e.codes.length) {
+          box.style.display = 'none';
+          box.textContent = '';
+          return;
+        }
+        box.className = 'alert alert-light border small font-monospace mt-2 mb-0 py-2';
+        box.textContent = 'Исходные коды для маппинга: ' + e.codes.join(', ') + (e.truncated ? ' …' : '');
+        box.style.display = 'block';
+      }
+
+      function filterRef(q) {
+        const root = document.getElementById('refList');
+        if (!root) return;
+        const s = (q || '').toLowerCase().trim();
+        root.querySelectorAll('.ref-row').forEach(function (row) {
+          const hay = row.dataset.q || '';
+          row.style.display = !s || hay.includes(s) ? '' : 'none';
+        });
+      }
+
+      document.getElementById('groupVarSelect')?.addEventListener('change', renderGroupVarHint);
+      document.addEventListener('DOMContentLoaded', renderGroupVarHint);
+
       const form = document.getElementById('varsForm');
       const overlay = document.getElementById('varOverlay');
       if (form && overlay) {

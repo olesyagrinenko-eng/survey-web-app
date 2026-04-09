@@ -650,13 +650,97 @@ def _template_column_bundle(df: pd.DataFrame, data_key: str) -> Dict[str, Any]:
     }
 
 
-# Две ведущие колонки кросс-таблицы: метка вопроса (datamap / код) и категория ответа.
-CROSSTAB_ROW_LABEL_Q = "Метка вопроса"
-CROSSTAB_ROW_LABEL_A = "Текстовая формулировка"
+# Справочник кодов на странице «Создание переменных» (не тянуть сотни уникальных текстовых ответов).
+_VAR_REF_MAX_CODES = 50
+_VAR_REF_MAX_NUNIQUE = 180
+
+
+def _format_value_for_var_reference(v: Any) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    try:
+        if isinstance(v, (float, np.floating)) and float(v) == int(float(v)):
+            return str(int(float(v)))
+    except (ValueError, TypeError, OverflowError):
+        pass
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    s = str(v).strip()
+    return s
+
+
+def _variable_value_entry(
+    df: pd.DataFrame,
+    options_map: Dict[str, List[Any]],
+    code: str,
+) -> Dict[str, Any]:
+    """Коды значений для подсказки (группировка, логика): из OPTIONSTORE или из данных."""
+    c = str(code)
+    if c not in df.columns:
+        return {
+            "value_codes": [],
+            "value_codes_truncated": False,
+            "value_codes_note": "столбец не найден",
+        }
+    mapped = options_map.get(c)
+    if mapped is not None and len(mapped) > 0:
+        uniq = list(mapped)
+    else:
+        nu = int(df[c].nunique(dropna=True))
+        if nu > _VAR_REF_MAX_NUNIQUE:
+            return {
+                "value_codes": [],
+                "value_codes_truncated": False,
+                "value_codes_note": (
+                    f"в столбце {nu} уникальных значений — список не показан "
+                    f"(для открытого текста смотрите частоты в исходной базе)"
+                ),
+            }
+        uniq = _get_series_all_values(df, c, options_map)
+    truncated = len(uniq) > _VAR_REF_MAX_CODES
+    codes = []
+    for v in uniq[: _VAR_REF_MAX_CODES]:
+        s = _format_value_for_var_reference(v)
+        if s:
+            codes.append(s)
+    return {
+        "value_codes": codes,
+        "value_codes_truncated": truncated,
+        "value_codes_note": None,
+    }
+
+
+def _enrich_column_items_with_value_codes(
+    items: List[Dict[str, Any]],
+    df: pd.DataFrame,
+    data_key: str,
+) -> List[Dict[str, Any]]:
+    opts = OPTIONSTORE.get(data_key, {}) or {}
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        d = dict(it)
+        extra = _variable_value_entry(df, opts, it["code"])
+        d.update(extra)
+        out.append(d)
+    return out
+
+
+# Три ведущие колонки строки: код переменной, формулировка вопроса (datamap), категория ответа.
+CROSSTAB_ROW_VAR_CODE = "Код переменной"
+CROSSTAB_ROW_QUESTION = "Формулировка вопроса"
+CROSSTAB_ROW_ANSWER = "Категория ответа"
+# Старый двухколоночный экспорт (до разделения кода и текста вопроса)
+_CROSSTAB_LEGACY_COL_Q = "Метка вопроса"
+_CROSSTAB_LEGACY_COL_A = "Текстовая формулировка"
+
+
+def _crosstab_question_from_labels(c_labels: Dict[str, str], code: str) -> str:
+    """Только текст метки из datamap/.sav, без подстановки кода переменной."""
+    return str(c_labels.get(str(code), "") or "").strip()
 
 
 def _crosstab_category_text(rv: Any) -> str:
-    """Текст во второй колонке строки (категория / значение показателя)."""
+    """Текст в колонке категории ответа (код/значение из данных)."""
     if pd.isna(rv):
         return ""
     try:
@@ -669,9 +753,15 @@ def _crosstab_category_text(rv: Any) -> str:
     return str(rv)
 
 
-def _significance_key_serialize(row_q: str, row_a: str, col_label: str) -> str:
+def _significance_key_serialize(
+    row_code: str, row_question: str, row_answer: str, col_label: str
+) -> str:
     """Стабильный ключ для JSON/hранилища (без разделителя || внутри полей)."""
-    return json.dumps([row_q, row_a, col_label], ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        [row_code, row_question, row_answer, col_label],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _crosstab_cell_str(val: Any) -> str:
@@ -684,24 +774,28 @@ def _crosstab_cell_str(val: Any) -> str:
     return s
 
 
-def _significance_dict_from_storage(raw: Dict[str, Any]) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+def _significance_dict_from_storage(raw: Dict[str, Any]) -> Dict[Tuple[str, str, str, str], Dict[str, Any]]:
     """Восстанавливает словарь значимостей из RESULTSTORE (новый и старый формат ключей)."""
-    out: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    out: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     for k, v in raw.items():
         if not isinstance(k, str):
             continue
         try:
             a = json.loads(k)
+            if isinstance(a, list) and len(a) == 4:
+                out[(str(a[0]), str(a[1]), str(a[2]), str(a[3]))] = v
+                continue
             if isinstance(a, list) and len(a) == 3:
-                out[(str(a[0]), str(a[1]), str(a[2]))] = v
+                # Было: (метка или код в одном поле, категория ответа, столбец)
+                out[("", str(a[0]), str(a[1]), str(a[2]))] = v
                 continue
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         if "||" in k:
             row_part, ck = k.split("||", 1)
-            out[(row_part, "", ck)] = v
+            out[("", "", row_part, ck)] = v
         else:
-            out[(k, "", "")] = v
+            out[(k, "", "", "")] = v
     return out
 
 
@@ -737,13 +831,13 @@ def build_crosstab(
     config: SurveyConfig,
     all_values_map: Dict[str, List[Any]] | None = None,
     column_labels: Dict[str, str] | None = None,
-) -> Tuple[pd.DataFrame, Dict[Tuple[str, str, str], Dict[str, Any]]]:
+) -> Tuple[pd.DataFrame, Dict[Tuple[str, str, str, str], Dict[str, Any]]]:
     """
     Строит кросс‑таблицу.
     Возвращает:
-      - таблицу значений (две ведущие колонки: метка вопроса и текстовая формулировка категории)
-      - словарь значимостей {(метка_вопроса, формулировка, заголовок_столбца) -> {"z", "p", "direction"}}
-    column_labels: подписи переменных (.sav / datamap) для меток вопросов и заголовков сегментов.
+      - таблицу значений (три ведущие колонки: код переменной, формулировка вопроса из меток, категория ответа)
+      - словарь значимостей {(код, формулировка_вопроса, категория, заголовок_столбца) -> {"z", "p", "direction"}}
+    column_labels: подписи переменных (.sav / datamap) для колонки «Формулировка вопроса» и заголовков сегментов.
     """
     weight_col = "weight" if config.use_weights and "weight" in df.columns else None
     all_values_map = all_values_map or {}
@@ -777,7 +871,7 @@ def build_crosstab(
         uniq = _get_series_all_values(df, col_var, all_values_map)
         est_col_values += min(len(uniq), MAX_COL_VALUES)
 
-    est_total_cols = 2 + est_col_values  # две колонки описания строки + Total и сегменты
+    est_total_cols = 3 + est_col_values  # три колонки описания строки + Total и сегменты (оценка)
     cov_extra = len(config.row_vars) if config.show_segment_coverage else 0
     est_cells = (est_row_count + 1 + cov_extra) * est_total_cols
     if est_row_count <= 0:
@@ -821,14 +915,14 @@ def build_crosstab(
             analysis_defs.append({"label": " | ".join(parts), "mask": mask})
 
     # заголовки
-    headers = [CROSSTAB_ROW_LABEL_Q, CROSSTAB_ROW_LABEL_A]
+    headers = [CROSSTAB_ROW_VAR_CODE, CROSSTAB_ROW_QUESTION, CROSSTAB_ROW_ANSWER]
     headers.extend([d["label"] for d in analysis_defs])
 
     rows: List[List[Any]] = []
-    significance: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    significance: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
     # первая строка — невзвешенные размеры выборки
-    sample_row = ["Выборка (N)", ""]
+    sample_row = ["Выборка (N)", "", ""]
     for d in analysis_defs:
         mask = d["mask"]
         n = len(df) if mask is None else int(mask.sum())
@@ -841,7 +935,8 @@ def build_crosstab(
                 continue
             answered = df[row_var].notna()
             cov_row: List[Any] = [
-                _var_display(row_var),
+                str(row_var),
+                _crosstab_question_from_labels(c_labels, str(row_var)),
                 "Охват по ЦГ (ответивших / в сегменте)",
             ]
             for d in analysis_defs:
@@ -859,9 +954,10 @@ def build_crosstab(
             continue
         limited_row_values = unique_vals[:MAX_ROW_VALUES] if len(unique_vals) > MAX_ROW_VALUES else unique_vals
         for rv in limited_row_values:
-            row_q = _var_display(row_var)
-            row_a = _crosstab_category_text(rv)
-            row: List[Any] = [row_q, row_a]
+            row_code = str(row_var)
+            row_question = _crosstab_question_from_labels(c_labels, row_code)
+            row_answer = _crosstab_category_text(rv)
+            row: List[Any] = [row_code, row_question, row_answer]
 
             # для z‑теста нам нужны success и n для total и каждой группы (по percent)
             total_success = 0.0
@@ -921,7 +1017,7 @@ def build_crosstab(
                     if p < 0.05:
                         direction = "up" if z > 0 else "down"
                     col_label = analysis_defs[idx]["label"]
-                    significance[(row_q, row_a, col_label)] = {
+                    significance[(row_code, row_question, row_answer, col_label)] = {
                         "z": z,
                         "p": p,
                         "direction": direction,
@@ -935,7 +1031,7 @@ def build_crosstab(
 
 def _annotate_table_with_significance(
     table_df: pd.DataFrame,
-    significance: Dict[Tuple[str, str, str], Dict[str, Any]],
+    significance: Dict[Tuple[str, str, str, str], Dict[str, Any]],
 ) -> pd.DataFrame:
     """
     Добавляет маркеры значимости прямо в значения таблицы:
@@ -946,21 +1042,42 @@ def _annotate_table_with_significance(
         return table_df.copy()
 
     out = table_df.copy()
-    if CROSSTAB_ROW_LABEL_Q not in out.columns or CROSSTAB_ROW_LABEL_A not in out.columns:
+    row_index: Dict[Tuple[str, str, str], int] = {}
+
+    if (
+        CROSSTAB_ROW_VAR_CODE in out.columns
+        and CROSSTAB_ROW_QUESTION in out.columns
+        and CROSSTAB_ROW_ANSWER in out.columns
+    ):
+        ic = out.columns.get_loc(CROSSTAB_ROW_VAR_CODE)
+        iq = out.columns.get_loc(CROSSTAB_ROW_QUESTION)
+        ia = out.columns.get_loc(CROSSTAB_ROW_ANSWER)
+        for idx in range(len(out)):
+            c0 = _crosstab_cell_str(out.iat[idx, ic])
+            c1 = _crosstab_cell_str(out.iat[idx, iq])
+            c2 = _crosstab_cell_str(out.iat[idx, ia])
+            row_index[(c0, c1, c2)] = idx
+    elif _CROSSTAB_LEGACY_COL_Q in out.columns and _CROSSTAB_LEGACY_COL_A in out.columns:
+        iq = out.columns.get_loc(_CROSSTAB_LEGACY_COL_Q)
+        ia = out.columns.get_loc(_CROSSTAB_LEGACY_COL_A)
+        for idx in range(len(out)):
+            c1 = _crosstab_cell_str(out.iat[idx, iq])
+            c2 = _crosstab_cell_str(out.iat[idx, ia])
+            row_index[("", c1, c2)] = idx
+    else:
         return out
 
-    row_index: Dict[Tuple[str, str], int] = {}
-    iq = out.columns.get_loc(CROSSTAB_ROW_LABEL_Q)
-    ia = out.columns.get_loc(CROSSTAB_ROW_LABEL_A)
-    for idx in range(len(out)):
-        rq = _crosstab_cell_str(out.iat[idx, iq])
-        ra = _crosstab_cell_str(out.iat[idx, ia])
-        row_index[(rq, ra)] = idx
-
-    for (row_q, row_a, col_label), info in significance.items():
+    for (row_code, row_q, row_a, col_label), info in significance.items():
         if col_label not in out.columns:
             continue
-        r_idx = row_index.get((_crosstab_cell_str(row_q), _crosstab_cell_str(row_a)))
+        key = (
+            _crosstab_cell_str(row_code),
+            _crosstab_cell_str(row_q),
+            _crosstab_cell_str(row_a),
+        )
+        r_idx = row_index.get(key)
+        if r_idx is None:
+            r_idx = row_index.get(("", key[1], key[2]))
         if r_idx is None:
             continue
 
@@ -978,7 +1095,7 @@ def _annotate_table_with_significance(
 def _apply_significance_fill_to_excel(
     excel_path: str,
     table_df: pd.DataFrame,
-    significance: Dict[Tuple[str, str, str], Dict[str, Any]],
+    significance: Dict[Tuple[str, str, str, str], Dict[str, Any]],
 ) -> None:
     """
     Красит ячейки значимых отличий в Excel (без изменения значения ячейки).
@@ -994,34 +1111,51 @@ def _apply_significance_fill_to_excel(
     for idx, col_name in enumerate(table_df.columns.tolist(), start=1):
         header_to_col_idx[str(col_name)] = idx
 
-    rowlabel_to_row_idx: Dict[Tuple[str, str], int] = {}
-    if CROSSTAB_ROW_LABEL_Q in table_df.columns and CROSSTAB_ROW_LABEL_A in table_df.columns:
-        iq = table_df.columns.get_loc(CROSSTAB_ROW_LABEL_Q)
-        ia = table_df.columns.get_loc(CROSSTAB_ROW_LABEL_A)
+    rowlabel_to_row_idx: Dict[Tuple[str, str, str], int] = {}
+    if (
+        CROSSTAB_ROW_VAR_CODE in table_df.columns
+        and CROSSTAB_ROW_QUESTION in table_df.columns
+        and CROSSTAB_ROW_ANSWER in table_df.columns
+    ):
+        ic = table_df.columns.get_loc(CROSSTAB_ROW_VAR_CODE)
+        iq = table_df.columns.get_loc(CROSSTAB_ROW_QUESTION)
+        ia = table_df.columns.get_loc(CROSSTAB_ROW_ANSWER)
         for i in range(len(table_df)):
-            rq = _crosstab_cell_str(table_df.iat[i, iq])
-            ra = _crosstab_cell_str(table_df.iat[i, ia])
-            rowlabel_to_row_idx[(rq, ra)] = i + 2
+            c0 = _crosstab_cell_str(table_df.iat[i, ic])
+            c1 = _crosstab_cell_str(table_df.iat[i, iq])
+            c2 = _crosstab_cell_str(table_df.iat[i, ia])
+            rowlabel_to_row_idx[(c0, c1, c2)] = i + 2
+    elif _CROSSTAB_LEGACY_COL_Q in table_df.columns and _CROSSTAB_LEGACY_COL_A in table_df.columns:
+        iq = table_df.columns.get_loc(_CROSSTAB_LEGACY_COL_Q)
+        ia = table_df.columns.get_loc(_CROSSTAB_LEGACY_COL_A)
+        for i in range(len(table_df)):
+            c1 = _crosstab_cell_str(table_df.iat[i, iq])
+            c2 = _crosstab_cell_str(table_df.iat[i, ia])
+            rowlabel_to_row_idx[("", c1, c2)] = i + 2
     else:
-        # Старый формат с одной колонкой «Переменная»
         legacy = "Переменная"
         if legacy in table_df.columns:
             il = table_df.columns.get_loc(legacy)
             for i in range(len(table_df)):
-                rowlabel_to_row_idx[(_crosstab_cell_str(table_df.iat[i, il]), "")] = i + 2
+                rowlabel_to_row_idx[("", "", _crosstab_cell_str(table_df.iat[i, il]))] = i + 2
 
     fill_up = PatternFill(fill_type="solid", fgColor="C6EFCE")
     fill_down = PatternFill(fill_type="solid", fgColor="FFC7CE")
 
-    for (row_q, row_a, col_label), info in significance.items():
+    for (row_code, row_q, row_a, col_label), info in significance.items():
         direction = str(info.get("direction", "none"))
         if direction not in {"up", "down"}:
             continue
-        excel_row = rowlabel_to_row_idx.get(
-            (_crosstab_cell_str(row_q), _crosstab_cell_str(row_a))
+        k = (
+            _crosstab_cell_str(row_code),
+            _crosstab_cell_str(row_q),
+            _crosstab_cell_str(row_a),
         )
+        excel_row = rowlabel_to_row_idx.get(k)
         if excel_row is None:
-            excel_row = rowlabel_to_row_idx.get((_crosstab_cell_str(row_q), ""))
+            excel_row = rowlabel_to_row_idx.get(("", k[1], k[2]))
+        if excel_row is None:
+            excel_row = rowlabel_to_row_idx.get(("", "", k[2]))
         excel_col = header_to_col_idx.get(str(col_label))
         if excel_row is None or excel_col is None:
             continue
@@ -1942,7 +2076,8 @@ def configure():
             RESULTSTORE[result_id] = {
                 "table_html": table_html,
                 "significance": {
-                    _significance_key_serialize(rq, ra, ck): v for (rq, ra, ck), v in significance.items()
+                    _significance_key_serialize(rc, rq, ra, ck): v
+                    for (rc, rq, ra, ck), v in significance.items()
                 },
                 "table_json": display_df.to_json(orient="split"),
                 "table_raw_json": table_df.to_json(orient="split"),
@@ -2287,6 +2422,16 @@ def variables_page():
         return redirect(url_for("index"))
     columns = list(df.columns)
     col_bundle = _template_column_bundle(df, key)
+    enriched_items = _enrich_column_items_with_value_codes(col_bundle["column_items"], df, key)
+    col_bundle["column_items"] = enriched_items
+    var_values_lookup = {
+        str(it["code"]): {
+            "codes": it["value_codes"],
+            "truncated": bool(it["value_codes_truncated"]),
+            "note": (it.get("value_codes_note") or ""),
+        }
+        for it in enriched_items
+    }
     closed_columns = _detect_closed_columns(df)
 
     allowed_return = {"/configure", "/weight", "/variable-labels"}
@@ -2334,6 +2479,7 @@ def variables_page():
         return_to=return_to,
         show_result=show_result,
         created=created,
+        var_values_lookup=var_values_lookup,
         **col_bundle,
     )
 

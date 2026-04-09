@@ -174,8 +174,8 @@
 
           {% if last_config.get('show_segment_coverage') %}
             <p class="small text-muted mb-2">
-              Включён <strong>охват по сегментам</strong>: под строкой «Выборка (N)» идут строки «Охват: … (ответивших / в сегменте)» —
-              так видно, кому задавался вопрос в каждой целевой группе.
+              Включён <strong>охват по сегментам</strong>: под строкой «Выборка (N)» идут строки с тем же кодом и формулировкой вопроса,
+              а в третьей колонке — пояснение «Охват по ЦГ (ответивших / в сегменте)» и числа по каждому столбцу.
             </p>
           {% endif %}
 
@@ -209,7 +209,9 @@
               {% for row_key, info in significance.items() %}
                 {% if info.direction != 'none' %}
                   <li>
-                    <strong>{{ row_key[0] }}</strong>{% if row_key[1] %} · {{ row_key[1] }}{% endif %} — <em>{{ row_key[2] }}</em>:
+                    <span class="font-monospace">{{ row_key[0] }}</span>
+                    {% if row_key[1] %} · {{ row_key[1] }}{% endif %}
+                    · <strong>{{ row_key[2] }}</strong> — <em>{{ row_key[3] }}</em>:
                     {% if info.direction == 'up' %}
                       выше Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
                     {% elif info.direction == 'down' %}
