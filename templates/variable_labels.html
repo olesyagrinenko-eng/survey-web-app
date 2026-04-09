@@ -26,12 +26,53 @@
         {% endif %}
       {% endwith %}
 
+      {% if datamap_success %}
+        <div id="datamapSuccessPanel" class="card border-success shadow mb-4" style="border-width: 2px;">
+          <div class="card-body">
+            <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
+              <div>
+                <h4 class="card-title text-success mb-2">Метки обновлены</h4>
+                <p class="mb-2">
+                  Datamap применён{% if datamap_applied_at %}: <strong>{{ datamap_applied_at }}</strong>{% endif %}.
+                </p>
+                <ul class="mb-0">
+                  <li>Совпало кодов из файла с колонками базы: <strong>{{ datamap_matched if datamap_matched is not none else '—' }}</strong></li>
+                  <li>Записано или обновлено меток: <strong>{{ datamap_updated if datamap_updated is not none else '—' }}</strong></li>
+                  <li>Режим:
+                    {% if datamap_merge_mode == 'fill_empty' %}
+                      <strong>только там, где метка была пустая</strong>
+                    {% elif datamap_merge_mode == 'overwrite' %}
+                      <strong>перезапись для всех совпавших кодов</strong>
+                    {% else %}
+                      <strong>{{ datamap_merge_mode or '—' }}</strong>
+                    {% endif %}
+                  </li>
+                </ul>
+              </div>
+              <div class="d-flex flex-column gap-2 align-items-stretch">
+                <a href="{{ url_for('variable_labels') }}" class="btn btn-outline-secondary btn-sm">Скрыть это сообщение</a>
+                <form method="post" class="m-0">
+                  <input type="hidden" name="action" value="continue">
+                  <button type="submit" class="btn btn-success w-100">Перейти к выбору строк и столбцов</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+        <script>
+          (function () {
+            const el = document.getElementById('datamapSuccessPanel');
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          })();
+        </script>
+      {% endif %}
+
       <div class="card shadow-sm mb-3">
         <div class="card-body">
           <p class="mb-2">
             В данных <strong>{{ n_columns }}</strong> переменных.
-            С текстовой меткой вопроса сейчас: <strong>{{ n_column_labels }}</strong>
-            (из .sav или из datamap).
+            С понятным отображаемым текстом сейчас: <strong>{{ n_column_labels }}</strong>
+            (метки из .sav / datamap, вторая строка Excel/CSV или длинный заголовок столбца).
           </p>
           <p class="text-muted small mb-0">
             Коды столбцов в файле не переименовываются — метки используются только для удобства в интерфейсе.
@@ -106,9 +147,12 @@
                         {% if item.label %}
                           <div class="fw-medium">{{ item.label }}</div>
                           <div class="small text-muted font-monospace">{{ item.code }}</div>
+                        {% elif item.header_is_descriptive %}
+                          <div class="fw-medium">{{ item.code }}</div>
+                          <div class="small text-muted">текст из заголовка файла (Excel/CSV)</div>
                         {% else %}
                           <div class="font-monospace">{{ item.code }}</div>
-                          <div class="small text-warning">метка не задана — подгрузите datamap или проверьте .sav</div>
+                          <div class="small text-warning">метка не задана — для .sav подгрузите datamap или проверьте метаданные</div>
                         {% endif %}
                       </div>
                     {% endfor %}

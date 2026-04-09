@@ -85,6 +85,8 @@
                         {% if item.label %}
                           <span class="fw-medium">{{ item.label }}</span><br>
                           <small class="text-muted font-monospace">{{ item.code }}</small>
+                        {% elif item.header_is_descriptive %}
+                          <span class="fw-medium">{{ item.code }}</span>
                         {% else %}
                           <span class="font-monospace">{{ item.code }}</span>
                         {% endif %}
@@ -140,6 +142,8 @@
                         {% if item.label %}
                           <span class="fw-medium">{{ item.label }}</span><br>
                           <small class="text-muted font-monospace">{{ item.code }}</small>
+                        {% elif item.header_is_descriptive %}
+                          <span class="fw-medium">{{ item.code }}</span>
                         {% else %}
                           <span class="font-monospace">{{ item.code }}</span>
                         {% endif %}

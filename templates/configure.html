@@ -53,32 +53,20 @@
                 <div class="card-body">
                   <div id="rowVarsList" style="max-height: 400px; overflow-y: auto;">
                     <input type="search" class="form-control form-control-sm mb-2" placeholder="Поиск…" oninput="filterVarTree('rowVarsList', this.value)">
-                    <div class="accordion accordion-flush" id="rowVarsListAcc">
-                      {% for group in column_groups %}
-                        {% set gid = loop.index %}
-                        <div class="accordion-item">
-                          <h2 class="accordion-header">
-                            <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#row_grp{{ gid }}">
-                              {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.members|length }}</span>
-                            </button>
-                          </h2>
-                          <div id="row_grp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#rowVarsListAcc">
-                            <div class="accordion-body py-2">
-                              {% for item in group.members %}
-                                <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
-                                  <input class="form-check-input" type="checkbox" name="row_vars" value="{{ item.code }}" form="cfgForm" id="row_{{ gid }}_{{ loop.index }}" {% if item.code in preselected_rows %}checked{% endif %}>
-                                  <label class="form-check-label" for="row_{{ gid }}_{{ loop.index }}">
-                                    {% if item.label %}
-                                      <span class="fw-medium">{{ item.label }}</span><br>
-                                      <small class="text-muted font-monospace">{{ item.code }}</small>
-                                    {% else %}
-                                      <span class="font-monospace">{{ item.code }}</span>
-                                    {% endif %}
-                                  </label>
-                                </div>
-                              {% endfor %}
-                            </div>
-                          </div>
+                    <div id="rowVarsListAcc" class="py-1">
+                      {% for item in column_items %}
+                        <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                          <input class="form-check-input" type="checkbox" name="row_vars" value="{{ item.code }}" form="cfgForm" id="row_{{ loop.index }}" {% if item.code in preselected_rows %}checked{% endif %}>
+                          <label class="form-check-label" for="row_{{ loop.index }}">
+                            {% if item.label %}
+                              <span class="fw-medium">{{ item.label }}</span><br>
+                              <small class="text-muted font-monospace">{{ item.code }}</small>
+                            {% elif item.header_is_descriptive %}
+                              <span class="fw-medium">{{ item.code }}</span>
+                            {% else %}
+                              <span class="font-monospace">{{ item.code }}</span>
+                            {% endif %}
+                          </label>
                         </div>
                       {% endfor %}
                     </div>
@@ -109,32 +97,20 @@
                   </div>
                   <div id="colVarsList" style="max-height: 400px; overflow-y: auto;">
                     <input type="search" class="form-control form-control-sm mb-2" placeholder="Поиск…" oninput="filterVarTree('colVarsList', this.value)">
-                    <div class="accordion accordion-flush" id="colVarsListAcc">
-                      {% for group in column_groups %}
-                        {% set gid = loop.index %}
-                        <div class="accordion-item">
-                          <h2 class="accordion-header">
-                            <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#col_grp{{ gid }}">
-                              {{ group.name }} <span class="badge bg-secondary ms-1">{{ group.members|length }}</span>
-                            </button>
-                          </h2>
-                          <div id="col_grp{{ gid }}" class="accordion-collapse collapse" data-bs-parent="#colVarsListAcc">
-                            <div class="accordion-body py-2">
-                              {% for item in group.members %}
-                                <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
-                                  <input class="form-check-input" type="checkbox" name="col_vars" value="{{ item.code }}" form="cfgForm" id="col_{{ gid }}_{{ loop.index }}" {% if item.code in preselected_cols %}checked{% endif %}>
-                                  <label class="form-check-label" for="col_{{ gid }}_{{ loop.index }}">
-                                    {% if item.label %}
-                                      <span class="fw-medium">{{ item.label }}</span><br>
-                                      <small class="text-muted font-monospace">{{ item.code }}</small>
-                                    {% else %}
-                                      <span class="font-monospace">{{ item.code }}</span>
-                                    {% endif %}
-                                  </label>
-                                </div>
-                              {% endfor %}
-                            </div>
-                          </div>
+                    <div id="colVarsListAcc" class="py-1">
+                      {% for item in column_items %}
+                        <div class="form-check tree-row mb-1" data-q="{{ (item.label ~ ' ' ~ item.code)|lower }}">
+                          <input class="form-check-input" type="checkbox" name="col_vars" value="{{ item.code }}" form="cfgForm" id="col_{{ loop.index }}" {% if item.code in preselected_cols %}checked{% endif %}>
+                          <label class="form-check-label" for="col_{{ loop.index }}">
+                            {% if item.label %}
+                              <span class="fw-medium">{{ item.label }}</span><br>
+                              <small class="text-muted font-monospace">{{ item.code }}</small>
+                            {% elif item.header_is_descriptive %}
+                              <span class="fw-medium">{{ item.code }}</span>
+                            {% else %}
+                              <span class="font-monospace">{{ item.code }}</span>
+                            {% endif %}
+                          </label>
                         </div>
                       {% endfor %}
                     </div>
@@ -292,19 +268,22 @@
           const hay = row.dataset.q || '';
           row.style.display = !s || hay.includes(s) ? '' : 'none';
         });
-        root.querySelectorAll('.accordion-item').forEach(function (item) {
-          const any = Array.from(item.querySelectorAll('.tree-row')).some(function (r) {
-            return r.style.display !== 'none';
-          });
-          item.style.display = !s || any ? '' : 'none';
-        });
       }
 
       const cfgForm = document.getElementById('cfgForm');
-      const overlay = document.getElementById('calcOverlay');
-      if (cfgForm && overlay) {
-        cfgForm.addEventListener('submit', function () {
-          overlay.style.display = 'block';
+      const calcOverlay = document.getElementById('calcOverlay');
+      function hideCalcOverlay() {
+        if (calcOverlay) calcOverlay.style.display = 'none';
+      }
+      window.addEventListener('pageshow', hideCalcOverlay);
+      if (cfgForm && calcOverlay) {
+        cfgForm.addEventListener('submit', function (e) {
+          const sub = e.submitter;
+          if (sub && sub.name === 'output_action' && sub.value === 'download') {
+            hideCalcOverlay();
+            return;
+          }
+          calcOverlay.style.display = 'block';
         });
       }
     </script>

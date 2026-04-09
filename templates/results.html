@@ -77,6 +77,8 @@
                           <label class="form-check-label small" for="rt_row_{{ loop.index }}" title="{{ item.label or item.code }}">
                             {% if item.label %}
                               {{ item.label|truncate(72) }}<br><span class="text-muted font-monospace" style="font-size:0.75rem;">{{ item.code }}</span>
+                            {% elif item.header_is_descriptive %}
+                              <span class="fw-medium">{{ item.code|truncate(72) }}</span>
                             {% else %}
                               <span class="font-monospace">{{ item.code }}</span>
                             {% endif %}
@@ -101,6 +103,8 @@
                           <label class="form-check-label small" for="rt_col_{{ loop.index }}" title="{{ item.label or item.code }}">
                             {% if item.label %}
                               {{ item.label|truncate(72) }}<br><span class="text-muted font-monospace" style="font-size:0.75rem;">{{ item.code }}</span>
+                            {% elif item.header_is_descriptive %}
+                              <span class="fw-medium">{{ item.code|truncate(72) }}</span>
                             {% else %}
                               <span class="font-monospace">{{ item.code }}</span>
                             {% endif %}
@@ -245,8 +249,17 @@
 
       const quickRetuneForm = document.getElementById('quickRetuneForm');
       const retuneOverlay = document.getElementById('retuneOverlay');
+      function hideRetuneOverlay() {
+        if (retuneOverlay) retuneOverlay.style.display = 'none';
+      }
+      window.addEventListener('pageshow', hideRetuneOverlay);
       if (quickRetuneForm && retuneOverlay) {
-        quickRetuneForm.addEventListener('submit', function () {
+        quickRetuneForm.addEventListener('submit', function (e) {
+          const sub = e.submitter;
+          if (sub && sub.name === 'output_action' && sub.value === 'download') {
+            hideRetuneOverlay();
+            return;
+          }
           retuneOverlay.style.display = 'block';
         });
       }

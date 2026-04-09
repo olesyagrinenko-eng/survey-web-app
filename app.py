@@ -6,6 +6,7 @@ import re
 import tempfile
 import traceback
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple
 
@@ -325,14 +326,99 @@ def _read_spss_from_path(path: str) -> Tuple[pd.DataFrame, Any]:
     ) from last_err
 
 
+def _column_name_looks_like_technical_code(c: str) -> bool:
+    """Короткое имя переменной (Q1, var_01), а не формулировка вопроса в заголовке столбца."""
+    s = str(c).strip()
+    if not s:
+        return True
+    if len(s) > 72:
+        return False
+    if any(ch.isspace() for ch in s):
+        return False
+    if s.isdigit():
+        return True
+    if re.match(r"^(?i)[QV]\d+[a-z]?$", s):
+        return True
+    if re.match(r"^[A-Za-z][A-Za-z0-9_.]{0,70}$", s):
+        return True
+    return False
+
+
+def _cell_looks_like_pure_survey_value(v: Any) -> bool:
+    """Число или числовая строка — похоже на ответ, а не на текст метки."""
+    if pd.isna(v):
+        return False
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return True
+    s = str(v).strip().replace("\u00a0", "").replace(",", ".")
+    if not s:
+        return False
+    if s.isdigit():
+        return True
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _maybe_promote_first_row_as_labels(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    """
+    Если первая строка данных похожа на строку текстовых меток под короткими именами столбцов
+    (частый экспорт: строка заголовка — коды, следующая — формулировки), переносим её в метки и удаляем из данных.
+    """
+    if df.shape[0] < 2:
+        return df, {}
+    first = df.iloc[0]
+    code_cols = [c for c in df.columns if _column_name_looks_like_technical_code(str(c))]
+    if len(code_cols) < 2:
+        return df, {}
+    numeric_like = 0
+    total_cells = 0
+    for c in df.columns:
+        total_cells += 1
+        if _cell_looks_like_pure_survey_value(first[c]):
+            numeric_like += 1
+    if total_cells and (numeric_like / total_cells) > 0.38:
+        return df, {}
+    labels: Dict[str, str] = {}
+    for c in code_cols:
+        v = first[c]
+        if pd.isna(v):
+            continue
+        vs = str(v).strip()
+        if not vs:
+            continue
+        if _cell_looks_like_pure_survey_value(v) and len(vs) <= 12:
+            continue
+        c_str = str(c)
+        plausible = (" " in vs) or (len(vs) >= 18) or (not vs.isascii() and len(vs) >= 10)
+        if not plausible:
+            continue
+        if len(vs) < len(c_str) + 4 and len(vs) < 16:
+            continue
+        labels[c_str] = vs
+    need = max(2, math.ceil(0.55 * len(code_cols)))
+    if len(labels) < need:
+        return df, {}
+    out = df.iloc[1:].copy().reset_index(drop=True)
+    return out, labels
+
+
 def _load_dataframe_from_upload(file_storage) -> Tuple[pd.DataFrame, Dict[str, List[Any]], Dict[str, str]]:
     filename = file_storage.filename or ""
     ext = _upload_extension(filename)
 
     if ext == "csv":
-        return pd.read_csv(file_storage), {}, {}
+        df = pd.read_csv(file_storage)
+        df, promoted = _maybe_promote_first_row_as_labels(df)
+        return df, {}, promoted
     if ext in {"xls", "xlsx"}:
-        return pd.read_excel(file_storage), {}, {}
+        df = pd.read_excel(file_storage)
+        df, promoted = _maybe_promote_first_row_as_labels(df)
+        return df, {}, promoted
     if ext in {"sav", "zsav", "por"}:
         suffix = f".{ext}" if ext else ".sav"
         fd, tmp_path = tempfile.mkstemp(suffix=suffix)
@@ -508,11 +594,19 @@ def _ui_column_items_from_columns(columns: List[str], data_key: str) -> List[Dic
     for col in columns:
         code = str(col)
         lab = str(labels.get(code, "")).strip()
-        out.append({"code": code, "label": lab, "has_label": bool(lab)})
+        header_descriptive = not _column_name_looks_like_technical_code(code)
+        out.append(
+            {
+                "code": code,
+                "label": lab,
+                "has_label": bool(lab),
+                "header_is_descriptive": header_descriptive,
+            }
+        )
     return sorted(
         out,
         key=lambda x: (
-            0 if x["has_label"] else 1,
+            0 if x["has_label"] else (1 if x["header_is_descriptive"] else 2),
             (x["label"] or x["code"]).lower(),
             x["code"].lower(),
         ),
@@ -553,7 +647,7 @@ def _template_column_bundle(df: pd.DataFrame, data_key: str) -> Dict[str, Any]:
         "columns": list(df.columns),
         "column_items": items,
         "column_groups": _ui_column_groups(items),
-        "n_column_labels": sum(1 for x in items if x["has_label"]),
+        "n_column_labels": sum(1 for x in items if x["has_label"] or x["header_is_descriptive"]),
     }
 
 
@@ -1606,17 +1700,28 @@ def variable_labels():
                 merge_mode = "overwrite"
             case_insensitive = bool(request.form.get("case_insensitive"))
             matched, updated = _apply_datamap_merge(key, cols, mapping, merge_mode, case_insensitive)
-            flash(
-                f"Datamap: совпало с колонками базы: {matched}, обновлено меток: {updated}. "
-                f"Режим: {'только там, где метки ещё пустые' if merge_mode == 'fill_empty' else 'перезапись для совпавших кодов'}.",
-                "success",
+            return redirect(
+                url_for(
+                    "variable_labels",
+                    success="datamap",
+                    matched=matched,
+                    updated=updated,
+                    mode=merge_mode,
+                )
             )
-            return redirect(url_for("variable_labels"))
+
+    datamap_success = request.args.get("success") == "datamap"
+    datamap_matched = request.args.get("matched", type=int)
+    datamap_updated = request.args.get("updated", type=int)
+    datamap_merge_mode = (request.args.get("mode") or "").strip()
+    datamap_applied_at = None
+    if datamap_success:
+        datamap_applied_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     try:
         items = _ui_column_items_from_columns(cols, key)
         groups = _ui_column_groups(items)
-        n_labeled = sum(1 for x in items if x["has_label"])
+        n_labeled = sum(1 for x in items if x["has_label"] or x["header_is_descriptive"])
         return render_template(
             "variable_labels.html",
             n_columns=len(cols),
@@ -1624,6 +1729,11 @@ def variable_labels():
             column_groups=groups,
             columns=cols,
             n_column_labels=n_labeled,
+            datamap_success=datamap_success,
+            datamap_matched=datamap_matched,
+            datamap_updated=datamap_updated,
+            datamap_merge_mode=datamap_merge_mode,
+            datamap_applied_at=datamap_applied_at,
         )
     except Exception as exc:
         # Защитный fallback: если страница дерева не смогла отрендериться
