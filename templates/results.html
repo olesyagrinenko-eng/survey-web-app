@@ -206,10 +206,10 @@
 
           {% if significance %}
             <ul>
-              {% for (row_label, col_label), info in significance.items() %}
+              {% for row_key, info in significance.items() %}
                 {% if info.direction != 'none' %}
                   <li>
-                    <strong>{{ row_label }}</strong> — <em>{{ col_label }}</em>:
+                    <strong>{{ row_key[0] }}</strong>{% if row_key[1] %} · {{ row_key[1] }}{% endif %} — <em>{{ row_key[2] }}</em>:
                     {% if info.direction == 'up' %}
                       выше Total (z={{ '%.2f'|format(info.z) }}, p={{ '%.3f'|format(info.p) }})
                     {% elif info.direction == 'down' %}
