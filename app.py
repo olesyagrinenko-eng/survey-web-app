@@ -337,7 +337,7 @@ def _column_name_looks_like_technical_code(c: str) -> bool:
         return False
     if s.isdigit():
         return True
-    if re.match(r"^(?i)[QV]\d+[a-z]?$", s):
+    if re.match(r"^[QV]\d+[a-z]?$", s, re.IGNORECASE):
         return True
     if re.match(r"^[A-Za-z][A-Za-z0-9_.]{0,70}$", s):
         return True
