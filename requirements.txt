@@ -4,4 +4,4 @@ pandas==2.2.3
 numpy==1.26.4
 openpyxl==3.1.5
 # SPSS (.sav, .zsav, .por) — обязательная зависимость для загрузки этих форматов
-pyreadstat==1.2.7
+pyreadstat==1.3.3
