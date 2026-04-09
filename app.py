@@ -26,6 +26,7 @@ from flask import (
 )
 import math
 from werkzeug.datastructures import FileStorage
+from werkzeug.exceptions import RequestEntityTooLarge
 from flask import after_this_request
 
 try:
@@ -36,8 +37,52 @@ except (ImportError, OSError):  # pragma: no cover - optional at runtime
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
-# Ограничиваем размер upload, чтобы не ловить OOM/502 на очень больших файлах.
-app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 40 MB
+
+
+def _parse_max_upload_bytes() -> int | None:
+    """
+    Лимит размера загружаемого файла (тело POST). Переменная окружения MAX_UPLOAD_MB (целое число мегабайт).
+    0 или отрицательное — без лимита (только для локальной отладки). По умолчанию 120 МБ.
+    Потолок 2048 МБ защищает от опечаток; очень большие .sav всё равно могут не поместиться в RAM инстанса.
+    """
+    raw = (os.getenv("MAX_UPLOAD_MB") or "120").strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        mb = 120
+    if mb <= 0:
+        return None
+    mb = min(mb, 2048)
+    return mb * 1024 * 1024
+
+
+def _max_upload_mb_message() -> str:
+    lim = app.config.get("MAX_CONTENT_LENGTH")
+    if lim is None:
+        return "Серверный лимит размера файла отключён (MAX_UPLOAD_MB≤0)."
+    mb = max(1, lim // (1024 * 1024))
+    return f"Максимальный размер файла: {mb} МБ (на сервере: MAX_UPLOAD_MB)."
+
+
+app.config["MAX_CONTENT_LENGTH"] = _parse_max_upload_bytes()
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _handle_request_entity_too_large(_err: RequestEntityTooLarge):  # noqa: ANN001
+    """413 при любой загрузке multipart (главная, datamap и т.д.)."""
+    lim = app.config.get("MAX_CONTENT_LENGTH")
+    if lim:
+        mb = max(1, lim // (1024 * 1024))
+        flash(
+            f"Файл слишком большой — действует лимит {mb} МБ. Увеличьте MAX_UPLOAD_MB на сервере при необходимости.",
+            "error",
+        )
+    else:
+        flash("Размер загрузки превышает лимит сервера или прокси.", "error")
+    ref = request.referrer
+    if ref and str(ref).startswith(request.host_url or ""):
+        return redirect(ref)
+    return redirect(url_for("index"))
 
 
 # --- Simple in‑memory "storage" for uploaded dataframes (per session) ---
@@ -94,9 +139,54 @@ def _read_column_manifest(data_key: str) -> List[str] | None:
         return None
 
 
+def _strip_column_name_control_chars(name: str) -> str:
+    """Имена столбцов без переводов строк — иначе ломаются HTML-формы и lookup после POST."""
+    s = str(name).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = " ".join(s.split())
+    return s.strip()
+
+
+def _sanitize_dataframe_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    """
+    Убирает \\r\\n в именах столбцов, схлопывает пробелы, разруливает дубликаты после нормализации.
+    Возвращает (новый df, карта старое_имя -> новое_имя) для подправки OPTIONSTORE / меток.
+    """
+    old = [str(c) for c in df.columns]
+    used: Dict[str, int] = {}
+    new_cols: List[str] = []
+    for c in old:
+        base = _strip_column_name_control_chars(c)
+        if not base:
+            base = "unnamed"
+        n = used.get(base, 0)
+        used[base] = n + 1
+        if n == 0:
+            new_cols.append(base)
+        else:
+            new_cols.append(f"{base}__{n + 1}")
+    out = df.copy()
+    out.columns = new_cols
+    return out, dict(zip(old, new_cols))
+
+
+def _remap_dict_keys_str(d: Dict[str, Any] | None, remap: Dict[str, str]) -> Dict[str, Any]:
+    if not d:
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in d.items():
+        sk = str(k)
+        nk = remap.get(sk, sk)
+        out[nk] = v
+    return out
+
+
 def _filter_labels_for_df(labels: Dict[str, str], df: pd.DataFrame) -> Dict[str, str]:
     cols = {str(c) for c in df.columns}
-    return {str(k): str(v).strip() for k, v in labels.items() if str(k) in cols and str(v).strip()}
+    return {
+        str(k): _strip_column_name_control_chars(str(v)).strip()
+        for k, v in labels.items()
+        if str(k) in cols and str(v).strip()
+    }
 
 
 def _filter_value_labels_for_df(
@@ -126,6 +216,10 @@ def _store_dataframe(
     path = f"/tmp/survey_data_{data_key}.pkl"
     df = df.copy()
     df.columns = [str(c) for c in df.columns]
+    df, col_remap = _sanitize_dataframe_column_names(df)
+    all_values_map = _remap_dict_keys_str(all_values_map, col_remap)
+    column_labels = _remap_dict_keys_str(column_labels, col_remap)
+    value_labels = _remap_dict_keys_str(value_labels, col_remap)
     try:
         df.to_pickle(path)
     except Exception:
@@ -135,7 +229,7 @@ def _store_dataframe(
         with open(path, "wb") as pf:
             _pickle.dump(df, pf, protocol=4)
     DATASTORE[data_key] = path
-    OPTIONSTORE[data_key] = all_values_map or {}
+    OPTIONSTORE[data_key] = all_values_map
     COLUMN_LABELSTORE[data_key] = _filter_labels_for_df(column_labels or {}, df)
     VALUE_LABELSTORE[data_key] = _filter_value_labels_for_df(value_labels or {}, df)
     try:
@@ -2058,12 +2152,29 @@ def index():
             except Exception as exc:
                 flash(f"Не удалось сохранить загруженные данные: {exc}", "error")
                 return redirect(url_for("index"))
+        except RequestEntityTooLarge:
+            lim = app.config.get("MAX_CONTENT_LENGTH")
+            if lim:
+                mb = max(1, lim // (1024 * 1024))
+                flash(
+                    f"Файл слишком большой для загрузки: действует лимит {mb} МБ. "
+                    f"На хостинге (Render и др.) увеличьте переменную окружения MAX_UPLOAD_MB и перезапустите сервис, "
+                    f"либо загрузите сжатую/урезанную базу.",
+                    "error",
+                )
+            else:
+                flash(
+                    "Размер файла превышает лимит (например, у обратного прокси). "
+                    "Проверьте настройки сервера или разбейте данные.",
+                    "error",
+                )
+            return redirect(url_for("index"))
         except Exception as exc:
             traceback.print_exc()
             flash(f"Внутренняя ошибка при загрузке файла: {exc}", "error")
             return redirect(url_for("index"))
 
-    return render_template("index.html")
+    return render_template("index.html", upload_limit_hint=_max_upload_mb_message())
 
 
 @app.route("/variable-labels", methods=["GET", "POST"])
