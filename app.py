@@ -682,15 +682,26 @@ def build_crosstab(
     df: pd.DataFrame,
     config: SurveyConfig,
     all_values_map: Dict[str, List[Any]] | None = None,
+    column_labels: Dict[str, str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict[Tuple[str, str], Dict[str, Any]]]:
     """
     Строит кросс‑таблицу.
     Возвращает:
       - таблицу значений
       - словарь значимостей {(row_label, col_label) -> {"z": .., "p": .., "dir": "up/down"}}
+    column_labels: подписи переменных (.sav / datamap) для колонок «Переменная» и заголовков сегментов.
     """
     weight_col = "weight" if config.use_weights and "weight" in df.columns else None
     all_values_map = all_values_map or {}
+    c_labels = {
+        str(k): str(v).strip()
+        for k, v in (column_labels or {}).items()
+        if str(v).strip()
+    }
+
+    def _var_display(code: str) -> str:
+        c = str(code)
+        return c_labels[c] if c in c_labels else c
 
     # Ограничения, чтобы не падать по памяти на Render
     MAX_ROW_UNIQUE_SKIP = 100
@@ -736,7 +747,7 @@ def build_crosstab(
                 uniques = uniques[:MAX_COL_VALUES]
             for val in uniques:
                 mask = df[col_var] == val
-                analysis_defs.append({"label": f"{col_var}: {val}", "mask": mask})
+                analysis_defs.append({"label": f"{_var_display(col_var)}: {val}", "mask": mask})
     else:
         # Опциональный второй уровень: комбинации выбранных столбцов
         cols_df = df[config.col_vars].dropna()
@@ -751,7 +762,7 @@ def build_crosstab(
             mask = pd.Series(True, index=df.index)
             for c in config.col_vars:
                 val = combo[c]
-                parts.append(f"{c}: {val}")
+                parts.append(f"{_var_display(c)}: {val}")
                 mask = mask & (df[c] == val)
             analysis_defs.append({"label": " | ".join(parts), "mask": mask})
 
@@ -775,7 +786,7 @@ def build_crosstab(
             if row_var not in df.columns:
                 continue
             answered = df[row_var].notna()
-            cov_label = f"Охват: {row_var} (ответивших / в сегменте)"
+            cov_label = f"Охват: {_var_display(row_var)} (ответивших / в сегменте)"
             cov_row: List[Any] = [cov_label]
             for d in analysis_defs:
                 col_mask = d["mask"]
@@ -792,7 +803,7 @@ def build_crosstab(
             continue
         limited_row_values = unique_vals[:MAX_ROW_VALUES] if len(unique_vals) > MAX_ROW_VALUES else unique_vals
         for rv in limited_row_values:
-            label = f"{row_var}: {rv}"
+            label = f"{_var_display(row_var)}: {rv}"
             row: List[Any] = [label]
 
             # для z‑теста нам нужны success и n для total и каждой группы (по percent)
@@ -1805,7 +1816,12 @@ def configure():
         excel_id = None
         result_id = None
         try:
-            table_df, significance = build_crosstab(df, config, OPTIONSTORE.get(key, {}))
+            table_df, significance = build_crosstab(
+                df,
+                config,
+                OPTIONSTORE.get(key, {}),
+                COLUMN_LABELSTORE.get(key, {}),
+            )
         except Exception as exc:
             flash(str(exc), "error")
             return redirect(url_for("configure"))
