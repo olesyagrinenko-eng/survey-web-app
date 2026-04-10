@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import traceback
 import uuid
@@ -499,6 +501,185 @@ def _read_spss_from_path(path: str) -> Tuple[pd.DataFrame, Any]:
     ) from last_err
 
 
+def _read_spss_payload_in_subprocess(
+    path: str,
+) -> Tuple[pd.DataFrame, Dict[str, List[Any]], Dict[str, str], Dict[str, Dict[str, str]]]:
+    """
+    Читает SPSS в отдельном процессе.
+    Это защищает gunicorn-воркер от native-crash (exit 139) внутри pyreadstat/readstat.
+    """
+    fd, payload_path = tempfile.mkstemp(suffix=".pkl")
+    os.close(fd)
+    script = r"""
+import os, sys, pickle
+import numpy as np
+import pandas as pd
+import pyreadstat
+
+def safe_sort(values):
+    try:
+        numeric = []
+        for v in values:
+            try:
+                numeric.append((float(v), v))
+            except Exception:
+                return sorted(values, key=lambda x: str(x))
+        return [orig for _, orig in sorted(numeric)]
+    except Exception:
+        return sorted(values, key=lambda x: str(x))
+
+def value_label_keys(code):
+    keys = [str(code)]
+    try:
+        keys.append(str(int(float(code))))
+    except Exception:
+        pass
+    out, seen = [], set()
+    for k in keys:
+        if k not in seen:
+            seen.add(k); out.append(k)
+    return out
+
+path = sys.argv[1]
+out_path = sys.argv[2]
+ext = os.path.splitext(path)[1].lower()
+encodings = [None, "utf-8", "latin-1", "cp1251", "cp1252"]
+last_err = None
+df = None
+meta = None
+for enc in encodings:
+    try:
+        if ext == ".por":
+            read_por = getattr(pyreadstat, "read_por", None)
+            if read_por is None:
+                raise RuntimeError("Формат .por не поддерживается этой версией pyreadstat.")
+            if enc is None:
+                df, meta = read_por(path)
+            else:
+                try:
+                    df, meta = read_por(path, encoding=enc)
+                except TypeError:
+                    df, meta = read_por(path)
+        else:
+            if enc is None:
+                df, meta = pyreadstat.read_sav(path)
+            else:
+                try:
+                    df, meta = pyreadstat.read_sav(path, encoding=enc)
+                except TypeError:
+                    df, meta = pyreadstat.read_sav(path)
+        break
+    except Exception as exc:
+        last_err = exc
+        continue
+
+if df is None:
+    raise RuntimeError(f"Не удалось прочитать SPSS-файл. Последняя ошибка: {last_err}")
+
+all_values = {}
+var_value_labels = getattr(meta, "variable_value_labels", None) or {}
+if isinstance(var_value_labels, dict):
+    for var_name, labels_map in var_value_labels.items():
+        if isinstance(labels_map, dict):
+            all_values[str(var_name)] = safe_sort(list(labels_map.keys()))
+
+if not all_values:
+    var_to_label = getattr(meta, "variable_to_label", None) or {}
+    value_labels = getattr(meta, "value_labels", None) or {}
+    if isinstance(var_to_label, dict) and isinstance(value_labels, dict):
+        for var_name, label_set_name in var_to_label.items():
+            labels_map = value_labels.get(label_set_name)
+            if isinstance(labels_map, dict):
+                all_values[str(var_name)] = safe_sort(list(labels_map.keys()))
+
+column_labels = {}
+d = getattr(meta, "column_names_to_labels", None)
+if isinstance(d, dict):
+    for k, v in d.items():
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        s = str(v).strip()
+        if s:
+            column_labels[str(k)] = s
+if not column_labels:
+    names = getattr(meta, "column_names", None)
+    labels = getattr(meta, "column_labels", None)
+    if isinstance(names, list) and isinstance(labels, list):
+        for n, lab in zip(names, labels):
+            if lab is None or (isinstance(lab, float) and pd.isna(lab)):
+                continue
+            s = str(lab).strip()
+            if s:
+                column_labels[str(n)] = s
+
+value_label_map = {}
+def consume(labels_map, var_name):
+    inner = {}
+    for code, lab in labels_map.items():
+        if lab is None or (isinstance(lab, float) and pd.isna(lab)):
+            continue
+        text = str(lab).strip()
+        if not text:
+            continue
+        for lk in value_label_keys(code):
+            inner[lk] = text
+    if inner:
+        value_label_map[str(var_name)] = inner
+
+if isinstance(var_value_labels, dict) and var_value_labels:
+    for var_name, labels_map in var_value_labels.items():
+        if isinstance(labels_map, dict):
+            consume(labels_map, var_name)
+else:
+    var_to_label = getattr(meta, "variable_to_label", None) or {}
+    value_labels = getattr(meta, "value_labels", None) or {}
+    if isinstance(var_to_label, dict) and isinstance(value_labels, dict):
+        for var_name, label_set_name in var_to_label.items():
+            labels_map = value_labels.get(label_set_name)
+            if isinstance(labels_map, dict):
+                consume(labels_map, var_name)
+
+with open(out_path, "wb") as f:
+    pickle.dump(
+        {
+            "df": df,
+            "all_values": all_values,
+            "column_labels": column_labels,
+            "value_labels": value_label_map,
+        },
+        f,
+        protocol=4,
+    )
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script, path, payload_path],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            reason = f"Подпроцесс чтения SPSS завершился с кодом {proc.returncode}."
+            if proc.returncode in (139, -11):
+                reason += " Похоже на segfault в pyreadstat/readstat для этого файла."
+            detail = f" {stderr[-500:]}" if stderr else ""
+            raise RuntimeError(reason + detail)
+        with open(payload_path, "rb") as pf:
+            payload = pickle.load(pf)
+        return (
+            payload["df"],
+            payload.get("all_values", {}) or {},
+            payload.get("column_labels", {}) or {},
+            payload.get("value_labels", {}) or {},
+        )
+    finally:
+        try:
+            os.remove(payload_path)
+        except OSError:
+            pass
+
+
 def _column_name_looks_like_technical_code(c: str) -> bool:
     """Короткое имя переменной (Q1, var_01), а не формулировка вопроса в заголовке столбца."""
     s = str(c).strip()
@@ -604,18 +785,13 @@ def _load_dataframe_from_upload(
             except (OSError, AttributeError, ValueError):
                 pass
             file_storage.save(tmp_path)
-            df, meta = _read_spss_from_path(tmp_path)
+            df, all_values, col_labels, val_labels = _read_spss_payload_in_subprocess(tmp_path)
         finally:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        return (
-            df,
-            _extract_all_values_from_sav_meta(meta),
-            _extract_column_labels_from_meta(meta),
-            _extract_value_label_map_from_meta(meta),
-        )
+        return (df, all_values, col_labels, val_labels)
 
     # Расширение не распознано: пробуем определить SPSS по сигнатуре (загрузка без .sav в имени)
     fd, tmp_path = tempfile.mkstemp(suffix=".bin")
@@ -627,13 +803,8 @@ def _load_dataframe_from_upload(
             pass
         file_storage.save(tmp_path)
         if _looks_like_spss_system_file(tmp_path):
-            df, meta = _read_spss_from_path(tmp_path)
-            return (
-                df,
-                _extract_all_values_from_sav_meta(meta),
-                _extract_column_labels_from_meta(meta),
-                _extract_value_label_map_from_meta(meta),
-            )
+            df, all_values, col_labels, val_labels = _read_spss_payload_in_subprocess(tmp_path)
+            return (df, all_values, col_labels, val_labels)
     finally:
         try:
             os.remove(tmp_path)
