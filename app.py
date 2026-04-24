@@ -69,6 +69,18 @@ def _max_upload_mb_message() -> str:
 app.config["MAX_CONTENT_LENGTH"] = _parse_max_upload_bytes()
 
 
+@app.after_request
+def _add_no_cache_headers(response):
+    """
+    Для динамических страниц отключаем cache, чтобы дерево переменных
+    всегда соответствовало последней загруженной базе.
+    """
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def _handle_request_entity_too_large(_err: RequestEntityTooLarge):  # noqa: ANN001
     """413 при любой загрузке multipart (главная, datamap и т.д.)."""
@@ -2305,6 +2317,15 @@ def index():
             try:
                 df, all_values_map, col_labels, val_labels = _load_dataframe_from_upload(file)
             except Exception as exc:
+                traceback.print_exc()
+                try:
+                    print(
+                        f"[upload] load failed: filename={file.filename!r}, "
+                        f"content_type={getattr(file, 'content_type', None)!r}, "
+                        f"error={exc!r}"
+                    )
+                except Exception:
+                    pass
                 flash(str(exc), "error")
                 return redirect(url_for("index"))
             # Новый файл = новый источник данных. Старое очищаем.
@@ -2319,7 +2340,8 @@ def index():
                 key = _store_dataframe(df, all_values_map, col_labels, val_labels)
                 session["data_key"] = key
                 session["active_data_key"] = key
-                return redirect(url_for("variable_labels"))
+                # cache-busting query string: браузер всегда тянет свежую страницу
+                return redirect(url_for("variable_labels", _ts=uuid.uuid4().hex))
             except Exception as exc:
                 flash(f"Не удалось сохранить загруженные данные: {exc}", "error")
                 return redirect(url_for("index"))
