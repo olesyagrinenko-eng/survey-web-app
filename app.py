@@ -68,6 +68,17 @@ def _max_upload_mb_message() -> str:
     return f"Максимальный размер файла: {mb} МБ (на сервере: MAX_UPLOAD_MB)."
 
 
+def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, v))
+
+
 app.config["MAX_CONTENT_LENGTH"] = _parse_max_upload_bytes()
 
 
@@ -1282,11 +1293,12 @@ def build_crosstab(
         c = str(code)
         return c_labels[c] if c in c_labels else c
 
-    # Ограничения, чтобы не падать по памяти на Render
-    MAX_ROW_UNIQUE_SKIP = 100
-    MAX_ROW_VALUES = 50
-    MAX_COL_VALUES = 50
-    MAX_TOTAL_CELLS = 50000  # оценка до фактического построения
+    # Ограничения по объему расчета (настраиваются через ENV для Render).
+    # Дефолты подняты, чтобы обрабатывать более крупные базы.
+    MAX_ROW_UNIQUE_SKIP = _env_int("CROSSTAB_MAX_ROW_UNIQUE_SKIP", 200, 20, 2000)
+    MAX_ROW_VALUES = _env_int("CROSSTAB_MAX_ROW_VALUES", 120, 10, 1000)
+    MAX_COL_VALUES = _env_int("CROSSTAB_MAX_COL_VALUES", 120, 10, 1000)
+    MAX_TOTAL_CELLS = _env_int("CROSSTAB_MAX_TOTAL_CELLS", 180000, 10000, 3000000)
 
     # Оценка размера результата (сколько строк * сколько столбцов)
     est_row_count = 0
@@ -1366,7 +1378,7 @@ def build_crosstab(
             continue
         row_value_total += min(len(vals), MAX_ROW_VALUES)
     complexity_est = int(len(df) * max(1, len(analysis_defs)) * max(1, row_value_total))
-    MAX_COMPLEXITY = 35_000_000
+    MAX_COMPLEXITY = _env_int("CROSSTAB_MAX_COMPLEXITY", 120_000_000, 5_000_000, 2_000_000_000)
     if complexity_est > MAX_COMPLEXITY:
         print(
             "[crosstab] complexity_guard",

@@ -11,6 +11,17 @@ services:
       # Лимит загрузки одного файла (МБ). Большие .sav поднимайте осторожно — нужна RAM инстанса.
       - key: MAX_UPLOAD_MB
         value: "200"
+      # Лимиты построения кросс-таблиц (увеличены для более крупных баз).
+      - key: CROSSTAB_MAX_ROW_UNIQUE_SKIP
+        value: "200"
+      - key: CROSSTAB_MAX_ROW_VALUES
+        value: "120"
+      - key: CROSSTAB_MAX_COL_VALUES
+        value: "120"
+      - key: CROSSTAB_MAX_TOTAL_CELLS
+        value: "180000"
+      - key: CROSSTAB_MAX_COMPLEXITY
+        value: "120000000"
       # Меньше пиков RAM на маленьких инстансах (numpy/pandas); не лечит segfault, но снижает риск OOM.
       - key: OPENBLAS_NUM_THREADS
         value: "1"
