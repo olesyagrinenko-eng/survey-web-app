@@ -2595,20 +2595,10 @@ def configure():
         except Exception as exc:
             flash(f"Не удалось подготовить отображение таблицы: {exc}", "error")
 
-        # Для режима "show" тоже подготовим Excel (но безопасно),
-        # чтобы была возможность скачать после просмотра.
-        try:
-            cells = int(table_df.shape[0] * table_df.shape[1])
-            if cells <= 50000:
-                excel_id = uuid.uuid4().hex
-                tmp_name = f"/tmp/survey_web_excel_{excel_id}.xlsx"
-                table_df.to_excel(tmp_name, index=False)
-                _apply_significance_fill_to_excel(tmp_name, table_df, significance)
-                EXCELSTORE[excel_id] = tmp_name
-                session["last_excel_id"] = excel_id
-        except Exception:
-            # Если Excel не подготовился - просто отключим кнопку скачивания
-            session.pop("last_excel_id", None)
+        # В режиме "show" НЕ генерируем Excel заранее: это может быть долго и
+        # приводить к timeout gunicorn на больших таблицах.
+        # Excel при необходимости соберется по отдельному запросу /download-excel.
+        session.pop("last_excel_id", None)
 
         return redirect(url_for("results"))
 
