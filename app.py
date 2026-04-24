@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -1356,6 +1357,36 @@ def build_crosstab(
     rows: List[List[Any]] = []
     significance: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
+    # Оценка вычислительной сложности (грубая): сравнения/булевы операции по маскам.
+    # Нужна, чтобы вернуть понятную ошибку раньше, чем gunicorn убьет worker по timeout.
+    row_value_total = 0
+    for row_var in config.row_vars:
+        vals = _get_series_all_values(df, row_var, all_values_map)
+        if len(vals) > MAX_ROW_UNIQUE_SKIP:
+            continue
+        row_value_total += min(len(vals), MAX_ROW_VALUES)
+    complexity_est = int(len(df) * max(1, len(analysis_defs)) * max(1, row_value_total))
+    MAX_COMPLEXITY = 35_000_000
+    if complexity_est > MAX_COMPLEXITY:
+        print(
+            "[crosstab] complexity_guard",
+            {
+                "n_rows": int(len(df)),
+                "row_vars": len(config.row_vars),
+                "col_defs": len(analysis_defs),
+                "row_value_total": int(row_value_total),
+                "complexity_est": int(complexity_est),
+                "limit": int(MAX_COMPLEXITY),
+            },
+        )
+        raise ValueError(
+            "Слишком тяжелый расчет для текущего сервера "
+            f"(оценка сложности: {complexity_est:,} операций масок). "
+            f"Параметры: строк в базе={len(df)}, строковых переменных={len(config.row_vars)}, "
+            f"сегментов={len(analysis_defs)}. "
+            "Уменьшите число строк/столбцов в кросс-таблице или отключите часть сегментов."
+        )
+
     # первая строка — невзвешенные размеры выборки
     sample_row = ["Выборка (N)", "", "", ""]
     for d in analysis_defs:
@@ -1389,11 +1420,13 @@ def build_crosstab(
         if len(unique_vals) > MAX_ROW_UNIQUE_SKIP:
             continue
         limited_row_values = unique_vals[:MAX_ROW_VALUES] if len(unique_vals) > MAX_ROW_VALUES else unique_vals
+        row_notna_mask = df[row_var].notna()
         for rv in limited_row_values:
             row_code = str(row_var)
             row_question = _crosstab_question_from_labels(c_labels, row_code)
             row_ans_code, row_ans_label = _crosstab_answer_code_and_label(vl_map, row_code, rv)
             row: List[Any] = [row_code, row_question, row_ans_code, row_ans_label]
+            row_value_mask = df[row_var] == rv
 
             # для z‑теста нам нужны success и n для total и каждой группы (по percent)
             total_success = 0.0
@@ -1404,11 +1437,11 @@ def build_crosstab(
                 col_mask = d["mask"]
                 if col_mask is None:
                     # База процента: от ответивших (default) или от всей выборки.
-                    base_mask = pd.Series(True, index=df.index) if config.percent_base_total_sample else df[row_var].notna()
-                    success_mask = (df[row_var] == rv) & base_mask
+                    base_mask = pd.Series(True, index=df.index) if config.percent_base_total_sample else row_notna_mask
+                    success_mask = row_value_mask & base_mask
                 else:
-                    base_mask = col_mask if config.percent_base_total_sample else (col_mask & df[row_var].notna())
-                    success_mask = (df[row_var] == rv) & col_mask
+                    base_mask = col_mask if config.percent_base_total_sample else (col_mask & row_notna_mask)
+                    success_mask = row_value_mask & col_mask
 
                 if weight_col:
                     base_n = df.loc[base_mask, weight_col].sum()
@@ -2535,6 +2568,7 @@ def configure():
 
         excel_id = None
         result_id = None
+        calc_started = time.perf_counter()
         try:
             table_df, significance = build_crosstab(
                 df,
@@ -2543,7 +2577,31 @@ def configure():
                 COLUMN_LABELSTORE.get(key, {}),
                 VALUE_LABELSTORE.get(key, {}),
             )
+            elapsed = round(time.perf_counter() - calc_started, 3)
+            print(
+                "[configure] crosstab_ok",
+                {
+                    "rows": int(len(df)),
+                    "row_vars": len(config.row_vars),
+                    "col_vars": len(config.col_vars),
+                    "output_action": output_action,
+                    "elapsed_sec": elapsed,
+                    "result_shape": [int(table_df.shape[0]), int(table_df.shape[1])],
+                },
+            )
         except Exception as exc:
+            elapsed = round(time.perf_counter() - calc_started, 3)
+            print(
+                "[configure] crosstab_fail",
+                {
+                    "rows": int(len(df)),
+                    "row_vars": len(config.row_vars),
+                    "col_vars": len(config.col_vars),
+                    "output_action": output_action,
+                    "elapsed_sec": elapsed,
+                    "error": repr(exc),
+                },
+            )
             flash(str(exc), "error")
             return redirect(url_for("configure"))
 
